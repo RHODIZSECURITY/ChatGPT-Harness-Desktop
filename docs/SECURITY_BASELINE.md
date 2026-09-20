@@ -32,20 +32,44 @@ reported as `timed_out`, never as success.
 
 - `runtime_status` — `wsl.exe --status`; classified ready, stopped, missing or unavailable.
 - `runtime_start` / `runtime_stop` — fixed `systemctl start|stop rhodiz-harness-bootstrap.service`
-  inside the managed distro. Both are serialized through a single process-wide
-  lifecycle lock; a concurrent attempt returns `blocked` rather than racing.
+  inside the managed distro. Both are serialized; a concurrent attempt returns
+  `blocked` rather than racing. See "Lifecycle exclusion" below.
 - `runtime_logs` — fixed `journalctl --unit … --lines <clamped>`. Output is line-
   and length-bounded, and any line matching a sensitive phrase or a credential
   token prefix is replaced by `[REDACTED SENSITIVE LOG LINE]`. Prefix markers are
   matched only at token boundaries, so ordinary lines such as `disk-usage` are
-  not redacted. stderr never reaches the renderer.
+  not redacted; JWT-shaped values are caught by their `eyJ` prefix even without
+  a labelling phrase. stderr is captured but never reaches the renderer: it is
+  used only to bound the payload, which keeps host paths and command errors out
+  of the UI at the cost of some diagnostic detail.
 - `runtime_provision` — **fails closed**. It performs no work and returns
   `blocked`, because signed runtime manifest verification does not exist yet.
-  Provisioning by arbitrary URL is deliberately not implemented.
+  Provisioning by arbitrary URL is deliberately not implemented. It takes the
+  lifecycle lock anyway, so the call site is already correct for the day it does
+  mutate.
 
-Commands that wait on `wsl.exe` are declared `#[tauri::command(async)]` so they
-run on Tauri's sync threadpool; a non-async command body would block the UI
-thread for up to `COMMAND_TIMEOUT_SECS`.
+Every command is declared `#[tauri::command(async)]` so it runs on Tauri's sync
+threadpool; a non-async command body would block the UI thread for up to
+`COMMAND_TIMEOUT_SECS`.
+
+## Lifecycle exclusion
+
+Mutating operations hold two guards:
+
+1. A process-wide `Mutex`, which rejects a second concurrent call inside this
+   process.
+2. A lock file under `%LOCALAPPDATA%`, opened denying all sharing.
+
+The second guard exists because the first is not sufficient on its own: this
+build does not enforce single-instance, so a second application process would
+otherwise drive the same systemd unit concurrently with its own private mutex.
+Windows releases the file handle when a process dies, so a crash cannot strand
+the lock. A lock file that cannot be created is treated as contention, so the
+operation fails closed rather than proceeding unguarded.
+
+**Uncertified:** the cross-process behaviour has been type-checked but not
+exercised on Windows. Two real processes contending for this lock is untested
+until it runs on a Windows host.
 
 Docker, Core, Route, Memory and Providers remain unavailable until their typed
 probes exist.
@@ -83,6 +107,11 @@ scoped to `broker-core`, and the Tauri app crate does not build on a plain Linux
 host. The full `cargo check --target x86_64-pc-windows-gnu` cross-check could not
 run in this environment either, because `tauri-winres` requires the mingw
 `x86_64-w64-mingw32-windres` binary, which is not installed.
+
+`verify:windows` now runs `clippy:tauri`, which compiles the whole workspace
+with `-D warnings`. Until this checkpoint the only gate touching `broker.rs` was
+a warning-tolerant `cargo check`, which is how a lifecycle lock that was never
+called, and a dead import, both passed CI.
 
 Instead, the broker's Windows code path was type-checked for
 `x86_64-pc-windows-gnu` in an isolated crate that depends on the real

@@ -42,6 +42,10 @@ pub const DEFAULT_LOG_LINES: u16 = 200;
 pub const MAX_LOG_LINES: u16 = 500;
 pub const MAX_LOG_LINE_CHARS: usize = 2_048;
 pub const COMMAND_TIMEOUT_SECS: u64 = 15;
+
+/// Location of the cross-process lifecycle lock, under `%LOCALAPPDATA%`.
+pub const LIFECYCLE_LOCK_DIRECTORY: &str = "com.rhodiz.harness.desktop";
+pub const LIFECYCLE_LOCK_FILE: &str = "runtime-lifecycle.lock";
 pub const MAX_CAPTURE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Matched anywhere in a log line. Each reads as a word, so a substring test
@@ -66,7 +70,16 @@ const SENSITIVE_LOG_PHRASES: [&str; 13] = [
 /// substrings would redact ordinary operational lines: `sk-` occurs inside
 /// `disk-usage`, `task-runner` and `risk-report`, and `akia` inside any word
 /// that happens to contain it.
-const SENSITIVE_TOKEN_PREFIXES: [&str; 5] = ["ghp_", "github_pat_", "sk-", "akia", "xoxb-"];
+const SENSITIVE_TOKEN_PREFIXES: [&str; 6] = [
+    "ghp_",
+    "github_pat_",
+    "sk-",
+    "akia",
+    "xoxb-",
+    // A JWT always starts with the base64 of `{"`, so any bearer-style token
+    // pasted into a log line is caught even without a labelling phrase.
+    "eyj",
+];
 
 /// Splits on every character that cannot appear inside a credential token, so a
 /// prefix only counts at a real token boundary. `key="sk-abc"` still yields the
@@ -214,6 +227,37 @@ pub fn unsupported_operation(operation: RuntimeOperation) -> RuntimeOperationRes
         operation,
         state: OperationState::Unsupported,
         detail: Some("managed runtime lifecycle is available only on Windows".to_string()),
+    }
+}
+
+/// Another lifecycle operation holds the lock inside this process.
+pub fn lifecycle_busy(operation: RuntimeOperation) -> RuntimeOperationResult {
+    RuntimeOperationResult {
+        operation,
+        state: OperationState::Blocked,
+        detail: Some("another managed runtime lifecycle operation is active".to_string()),
+    }
+}
+
+/// The lock could not be taken across processes. This covers both a second
+/// application process holding it and a lock file that cannot be created, so it
+/// fails closed in either case.
+pub fn lifecycle_cross_process_busy(operation: RuntimeOperation) -> RuntimeOperationResult {
+    RuntimeOperationResult {
+        operation,
+        state: OperationState::Blocked,
+        detail: Some(
+            "the cross-process managed runtime lifecycle lock could not be acquired".to_string(),
+        ),
+    }
+}
+
+/// The in-process lock was poisoned by a panic while held.
+pub fn lifecycle_lock_unavailable(operation: RuntimeOperation) -> RuntimeOperationResult {
+    RuntimeOperationResult {
+        operation,
+        state: OperationState::Failed,
+        detail: Some("managed runtime lifecycle lock is unavailable".to_string()),
     }
 }
 
@@ -386,6 +430,33 @@ mod tests {
         );
         assert!(!truncated);
         assert_eq!(lines[0], "disk-usage at 91 percent");
+    }
+
+    #[test]
+    fn jwt_shaped_tokens_are_redacted() {
+        let raw = "auth header eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig accepted";
+        let (lines, _) = sanitize_log_text(raw, Some(1));
+        assert_eq!(lines[0], "[REDACTED SENSITIVE LOG LINE]");
+    }
+
+    #[test]
+    fn lifecycle_contention_is_blocked_not_failed_and_never_succeeds() {
+        for build in [lifecycle_busy, lifecycle_cross_process_busy] {
+            let result = build(RuntimeOperation::Start);
+            assert_eq!(result.state, OperationState::Blocked);
+            assert_ne!(result.state, OperationState::Succeeded);
+            assert!(result.detail.is_some());
+        }
+        let poisoned = lifecycle_lock_unavailable(RuntimeOperation::Stop);
+        assert_eq!(poisoned.state, OperationState::Failed);
+    }
+
+    #[test]
+    fn lifecycle_lock_path_components_are_fixed() {
+        assert_eq!(LIFECYCLE_LOCK_DIRECTORY, "com.rhodiz.harness.desktop");
+        assert_eq!(LIFECYCLE_LOCK_FILE, "runtime-lifecycle.lock");
+        assert!(!LIFECYCLE_LOCK_FILE.contains('/'));
+        assert!(!LIFECYCLE_LOCK_FILE.contains('\\'));
     }
 
     #[test]

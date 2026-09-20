@@ -68,16 +68,46 @@ test('the broker resolves wsl.exe from an absolute system path, never from PATH'
 
 test('lifecycle mutations are serialized and never flash a console window', async () => {
   const broker = await read('src-tauri/src/broker.rs')
+  const core = await read('src-tauri/broker-core/src/lib.rs')
   expect(broker).toContain('.creation_flags(CREATE_NO_WINDOW)')
-  expect(broker).toContain('with_lifecycle_lock(RuntimeOperation::Start')
-  expect(broker).toContain('with_lifecycle_lock(RuntimeOperation::Stop')
+
+  // Every mutating command goes through the lock, provision included: it does
+  // no work today, but a call site that is already correct cannot be forgotten
+  // the way a comment can.
+  for (const operation of ['Provision', 'Start', 'Stop']) {
+    expect(broker).toContain(`with_lifecycle_lock(RuntimeOperation::${operation}`)
+  }
+
+  // An in-process Mutex cannot see a second copy of the application, and
+  // nothing here prevents one. Denying all sharing on the lock file is what
+  // actually keeps two processes off the same systemd unit.
+  expect(broker).toContain('.share_mode(0)')
+  expect(broker).toContain('LIFECYCLE_LOCK_FILE')
+  expect(core).toContain('pub const LIFECYCLE_LOCK_FILE')
+
   // Every command that waits on wsl.exe must leave the UI thread, or the window
   // freezes for up to COMMAND_TIMEOUT_SECS.
-  for (const command of ['runtime_status', 'runtime_start', 'runtime_stop', 'runtime_logs']) {
+  for (const command of [
+    'runtime_status',
+    'runtime_provision',
+    'runtime_start',
+    'runtime_stop',
+    'runtime_logs',
+  ]) {
     expect(broker).toMatch(
       new RegExp(String.raw`#\[tauri::command\(async\)\]\s*pub fn ${command}\(`),
     )
   }
+})
+
+test('a gate compiles the native broker with warnings denied', async () => {
+  const pkg = JSON.parse(await read('package.json'))
+  // verify:portable never compiles broker.rs - clippy:rust is scoped to
+  // broker-core and the app crate does not build on a plain Linux host. Without
+  // this gate a dead lock or a dead import reaches CI as a tolerated warning.
+  expect(pkg.scripts['clippy:tauri']).toContain('-D warnings')
+  expect(pkg.scripts['clippy:tauri']).not.toContain('-p ')
+  expect(pkg.scripts['verify:windows']).toContain('clippy:tauri')
 })
 
 test('log redaction matches credential prefixes only at token boundaries', async () => {

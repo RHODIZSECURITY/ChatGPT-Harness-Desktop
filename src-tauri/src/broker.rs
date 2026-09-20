@@ -1,9 +1,9 @@
 use rhodiz_harness_broker_core::{
-    classify_wsl_status, operation_result, provisioning_blocked, runtime_log_args,
-    runtime_status as build_status, sanitize_log_text, CommandOutcome, OperationState,
-    RuntimeLogsResult, RuntimeOperation, RuntimeOperationResult, RuntimeStatus,
-    COMMAND_TIMEOUT_SECS, MAX_CAPTURE_BYTES, WSL_EXE, WSL_START_ARGS, WSL_STATUS_ARGS,
-    WSL_STOP_ARGS,
+    classify_wsl_status, lifecycle_busy, lifecycle_lock_unavailable, operation_result,
+    provisioning_blocked, runtime_log_args, runtime_status as build_status, sanitize_log_text,
+    CommandOutcome, OperationState, RuntimeLogsResult, RuntimeOperation, RuntimeOperationResult,
+    RuntimeStatus, COMMAND_TIMEOUT_SECS, MAX_CAPTURE_BYTES, WSL_EXE, WSL_START_ARGS,
+    WSL_STATUS_ARGS, WSL_STOP_ARGS,
 };
 
 // Only the non-Windows fallbacks report "unsupported"; importing it
@@ -11,13 +11,19 @@ use rhodiz_harness_broker_core::{
 #[cfg(not(target_os = "windows"))]
 use rhodiz_harness_broker_core::unsupported_operation;
 
+#[cfg(target_os = "windows")]
+use rhodiz_harness_broker_core::{
+    lifecycle_cross_process_busy, LIFECYCLE_LOCK_DIRECTORY, LIFECYCLE_LOCK_FILE,
+};
+
 use std::sync::{Mutex, TryLockError};
 
 #[cfg(target_os = "windows")]
 use std::{
     env,
+    fs::{self, OpenOptions},
     io::Read,
-    os::windows::process::CommandExt,
+    os::windows::{fs::OpenOptionsExt, process::CommandExt},
     path::PathBuf,
     process::{Command, Stdio},
     thread,
@@ -178,23 +184,50 @@ fn platform_operation(operation: RuntimeOperation, _args: &[String]) -> RuntimeO
     unsupported_operation(operation)
 }
 
+/// Cross-process half of the lifecycle guard.
+///
+/// The in-process mutex cannot see a second copy of the application, and
+/// nothing in this build prevents one from being launched, so on its own it
+/// would leave two processes free to drive the same systemd unit at once. The
+/// file is opened denying all sharing, so a second process fails to open it at
+/// all. Windows releases the handle when a process dies, so a crash cannot
+/// strand the lock.
+///
+/// Returns `None` both when another process holds the lock and when the lock
+/// file cannot be created, so the caller fails closed either way.
+#[cfg(target_os = "windows")]
+fn acquire_cross_process_lock() -> Option<std::fs::File> {
+    let root = PathBuf::from(env::var_os("LOCALAPPDATA")?);
+    if !root.is_absolute() {
+        return None;
+    }
+    let directory = root.join(LIFECYCLE_LOCK_DIRECTORY);
+    fs::create_dir_all(&directory).ok()?;
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .share_mode(0)
+        .open(directory.join(LIFECYCLE_LOCK_FILE))
+        .ok()
+}
+
 fn with_lifecycle_lock<F>(operation: RuntimeOperation, action: F) -> RuntimeOperationResult
 where
     F: FnOnce() -> RuntimeOperationResult,
 {
-    match LIFECYCLE_MUTATION_LOCK.try_lock() {
-        Ok(_guard) => action(),
-        Err(TryLockError::WouldBlock) => RuntimeOperationResult {
-            operation,
-            state: OperationState::Blocked,
-            detail: Some("another managed runtime lifecycle operation is active".to_string()),
-        },
-        Err(TryLockError::Poisoned(_)) => RuntimeOperationResult {
-            operation,
-            state: OperationState::Failed,
-            detail: Some("managed runtime lifecycle lock is unavailable".to_string()),
-        },
-    }
+    let _process_guard = match LIFECYCLE_MUTATION_LOCK.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => return lifecycle_busy(operation),
+        Err(TryLockError::Poisoned(_)) => return lifecycle_lock_unavailable(operation),
+    };
+
+    #[cfg(target_os = "windows")]
+    let _machine_guard = match acquire_cross_process_lock() {
+        Some(file) => file,
+        None => return lifecycle_cross_process_busy(operation),
+    };
+
+    action()
 }
 
 #[cfg(target_os = "windows")]
@@ -215,11 +248,12 @@ pub fn runtime_status() -> RuntimeStatus {
     platform_status()
 }
 
-// Provisioning performs no mutation yet, so it does not take the lifecycle
-// lock; it must do so once signed-manifest provisioning is implemented.
-#[tauri::command]
+// Provisioning performs no mutation yet, but it takes the lifecycle lock all
+// the same: once signed-manifest provisioning is implemented it must hold it,
+// and a comment is easier to miss than a call site that is already correct.
+#[tauri::command(async)]
 pub fn runtime_provision() -> RuntimeOperationResult {
-    platform_provision()
+    with_lifecycle_lock(RuntimeOperation::Provision, platform_provision)
 }
 
 #[tauri::command(async)]
