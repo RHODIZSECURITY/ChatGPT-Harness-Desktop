@@ -89,10 +89,26 @@ test('log redaction matches credential prefixes only at token boundaries', async
 
 test('provenance anchors all three approved source repositories at exact commits', async () => {
   const provenance = await read('PROVENANCE.md')
-  expect(provenance).toContain('a0403035a20c91decadd011b907ee5b489f6788b')
-  expect(provenance).toContain('e11c874019dbf04032cfc3476d82eba1d069a3d8')
-  expect(provenance).toContain('2452f499a86ae215146d988e9418a481616238ad')
-  expect(provenance).toContain('None yet')
+  const pins = [
+    'a0403035a20c91decadd011b907ee5b489f6788b',
+    'e11c874019dbf04032cfc3476d82eba1d069a3d8',
+    '2452f499a86ae215146d988e9418a481616238ad',
+  ]
+  for (const pin of pins) expect(provenance).toContain(pin)
+
+  // Assert the shape of every source row, not the literal 'None yet'. Pinning
+  // that string makes "nothing imported yet" a permanent invariant, so the test
+  // would fail exactly when all three upstreams finally record a real import.
+  const rows = provenance
+    .split('\n')
+    .filter((line) => pins.some((pin) => line.includes(pin)))
+  expect(rows).toHaveLength(pins.length)
+  for (const row of rows) {
+    const cells = row.split('|').map((cell) => cell.trim()).filter(Boolean)
+    expect(cells).toHaveLength(5)
+    expect(cells[1]).toMatch(/^[0-9a-f]{40}$/)
+    expect(cells[4].length).toBeGreaterThan(0)
+  }
 })
 test('renderer dependency set contains no alternate backend or host shell', async () => {
   const pkg = JSON.parse(await read('package.json'))
