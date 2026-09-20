@@ -73,3 +73,16 @@ test('visible naming is canonical while stable protocol compatibility remains ex
   expect(authored[2]).toContain('RHODIZ-Harness')
   expect(authored[7]).toContain('MANAGED_DISTRO_NAME: &str = "RHODIZ-Harness"')
 })
+
+test('GitHub CI is pinned and certifies portable plus Windows gates', async () => {
+  const workflow = await read('.github/workflows/ci.yml')
+  expect(workflow).toContain('actions/checkout@11d5960a326750d5838078e36cf38b85af677262')
+  expect(workflow).toContain('actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020')
+  expect(workflow).toContain("node-version: '22.23.2'")
+  expect(workflow).toContain('rustup toolchain install 1.98.1')
+  expect(workflow).toContain('npm audit --audit-level=high')
+  expect(workflow).toContain('cargo audit --file src-tauri/Cargo.lock')
+  expect(workflow).toContain('npm run verify:portable')
+  expect(workflow).toContain('npm run verify:windows')
+  expect(workflow).not.toContain('|| true')
+})

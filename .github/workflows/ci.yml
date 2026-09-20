@@ -1,0 +1,89 @@
+name: Desktop CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portable:
+    name: Portable gates (Ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.2'
+          cache: npm
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+          rustup override set 1.98.1
+
+      - name: Install npm dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Audit npm dependencies
+        run: |
+          npm audit --audit-level=high
+          npm audit --omit=dev --audit-level=high
+
+      - name: Verify portable stack
+        run: npm run verify:portable
+
+      - name: Audit Rust dependencies
+        shell: bash
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit --file src-tauri/Cargo.lock
+      - name: Check whitespace
+        shell: bash
+        run: |
+          base="$(git merge-base HEAD origin/main)"
+          if [ "$base" = "$(git rev-parse HEAD)" ]; then
+            git diff --check HEAD^ HEAD
+          else
+            git diff --check "$base" HEAD
+          fi
+
+  windows:
+    name: Windows Tauri check
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.2'
+          cache: npm
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy --target x86_64-pc-windows-msvc
+          rustup override set 1.98.1
+
+      - name: Install npm dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Verify Windows stack
+        run: npm run verify:windows
