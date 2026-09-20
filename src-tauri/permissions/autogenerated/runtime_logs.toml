@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-runtime-logs"
+description = "Enables the runtime_logs command without any pre-configured scope."
+commands.allow = ["runtime_logs"]
+
+[[permission]]
+identifier = "deny-runtime-logs"
+description = "Denies the runtime_logs command without any pre-configured scope."
+commands.deny = ["runtime_logs"]

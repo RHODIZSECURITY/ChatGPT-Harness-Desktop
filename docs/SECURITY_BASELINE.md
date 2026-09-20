@@ -8,21 +8,47 @@ Harness Desktop is a client of Harness Core contract v1. The renderer is not a c
 
 ## Renderer and IPC
 
-- `runtime_status` is the only registered Tauri application command.
+- Exactly five commands are registered: `runtime_status`, `runtime_provision`, `runtime_start`, `runtime_stop` and `runtime_logs`.
 - `tauri_build::AppManifest` generates the command ACL.
 - Main-window capability is local-only and Windows-only.
-- The capability grants only `allow-runtime-status`.
+- The capability grants only the five matching `allow-runtime-*` permissions.
 - `core:default` is intentionally not granted.
 - No shell, process or log plugin is installed.
-- The renderer cannot supply an executable or argv.
+- The renderer cannot supply an executable or argv. The only renderer-supplied
+  value that reaches the broker is `runtime_logs(lines)`, a `u16` clamped to
+  `1..=500` and appended as a bare number after a fixed `--lines` flag.
 - CSP permits only local application resources and Tauri IPC/asset schemes required by the shell.
 - Production DevTools are disabled.
 
-## WSL probe
+## WSL operations
 
-The current broker operation is fixed to `wsl.exe --status`. Outcomes are classified as ready, stopped or missing; unknown managed-runtime components remain unavailable until their typed probes exist.
+Every operation runs a fixed argument vector against `wsl.exe`, resolved from an
+absolute `%SystemRoot%\System32` path rather than through `PATH`, so the broker
+does not depend on ambient path resolution. The process is spawned with
+`CREATE_NO_WINDOW`, stdin closed, and stdout/stderr captured on separate reader
+threads bounded to `MAX_CAPTURE_BYTES`. Each call is bounded by
+`COMMAND_TIMEOUT_SECS`; on expiry the child is killed and the outcome is
+reported as `timed_out`, never as success.
 
-This milestone does not expose provision/start/stop/log operations yet.
+- `runtime_status` — `wsl.exe --status`; classified ready, stopped, missing or unavailable.
+- `runtime_start` / `runtime_stop` — fixed `systemctl start|stop rhodiz-harness-bootstrap.service`
+  inside the managed distro. Both are serialized through a single process-wide
+  lifecycle lock; a concurrent attempt returns `blocked` rather than racing.
+- `runtime_logs` — fixed `journalctl --unit … --lines <clamped>`. Output is line-
+  and length-bounded, and any line matching a sensitive phrase or a credential
+  token prefix is replaced by `[REDACTED SENSITIVE LOG LINE]`. Prefix markers are
+  matched only at token boundaries, so ordinary lines such as `disk-usage` are
+  not redacted. stderr never reaches the renderer.
+- `runtime_provision` — **fails closed**. It performs no work and returns
+  `blocked`, because signed runtime manifest verification does not exist yet.
+  Provisioning by arbitrary URL is deliberately not implemented.
+
+Commands that wait on `wsl.exe` are declared `#[tauri::command(async)]` so they
+run on Tauri's sync threadpool; a non-async command body would block the UI
+thread for up to `COMMAND_TIMEOUT_SECS`.
+
+Docker, Core, Route, Memory and Providers remain unavailable until their typed
+probes exist.
 
 ## Dependency evidence
 
@@ -39,15 +65,36 @@ The five Windows warnings are upstream maintenance warnings, not known vulnerabi
 ## Local certification evidence
 
 - Oxlint: 0 warnings / 0 errors.
-- Vitest: 9/9 PASS.
+- Vitest: 15/15 PASS.
 - Executable TypeScript/React coverage: 100% statements, branches, functions and lines.
 - Production renderer build: PASS.
-- Rust broker-core: 3/3 PASS.
+- Rust broker-core: 9/9 PASS.
 - `cargo fmt --check`: PASS.
 - Clippy with `-D warnings`: PASS.
-- Tauri Windows GNU cross-check: PASS.
-- Test repeat: Vitest 10/10 rounds; Rust 10/10 rounds; production build 3/3 rounds.
-- `git diff --check`: PASS.
+- `npm run verify:portable`: PASS end to end.
+- npm audit, full and production sets: 0 vulnerabilities.
+- Test repeat: Vitest 5/5 rounds; Rust broker-core 5/5 rounds.
+- `git diff --check` against the base branch: PASS.
+
+### Coverage of the native broker on this checkpoint
+
+`verify:portable` does not compile `src-tauri/src/broker.rs`: `clippy:rust` is
+scoped to `broker-core`, and the Tauri app crate does not build on a plain Linux
+host. The full `cargo check --target x86_64-pc-windows-gnu` cross-check could not
+run in this environment either, because `tauri-winres` requires the mingw
+`x86_64-w64-mingw32-windres` binary, which is not installed.
+
+Instead, the broker's Windows code path was type-checked for
+`x86_64-pc-windows-gnu` in an isolated crate that depends on the real
+`broker-core` and carries the module verbatim minus its `#[tauri::command]`
+attributes: PASS with zero warnings. That covers `std::os::windows::process::CommandExt`,
+`creation_flags`, `wait_timeout::ChildExt` and the lifecycle-lock wiring. The
+`#[tauri::command(async)]` attribute itself was confirmed against
+`tauri-macros 2.6.3`, which lists `async` as an accepted attribute and maps a
+non-async function body to the `sync_threadpool` execution context.
+
+This is narrower than a native build and is **not** Windows certification. The
+Windows CI job remains the first place `broker.rs` is compiled in full.
 
 ## Evidence limitation
 

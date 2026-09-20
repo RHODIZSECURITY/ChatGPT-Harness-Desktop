@@ -15,7 +15,13 @@ test('Tauri shell is local-only with a non-null CSP and production devtools disa
   expect(capability.windows).toEqual(['main'])
   expect(capability.local).toBe(true)
   expect(capability.platforms).toEqual(['windows'])
-  expect(capability.permissions).toEqual(['allow-runtime-status'])
+  expect(capability.permissions).toEqual([
+    'allow-runtime-status',
+    'allow-runtime-provision',
+    'allow-runtime-start',
+    'allow-runtime-stop',
+    'allow-runtime-logs',
+  ])
   expect(JSON.stringify(capability)).not.toContain('core:default')
 })
 
@@ -27,13 +33,60 @@ test('native broker exposes no generic shell or process plugin', async () => {
   const build = await read('src-tauri/build.rs')
   expect(cargo).not.toContain('tauri-plugin-shell')
   expect(cargo).not.toContain('tauri-plugin-log')
-  expect(lib).toContain('generate_handler![broker::runtime_status]')
+  for (const command of [
+    'broker::runtime_status',
+    'broker::runtime_provision',
+    'broker::runtime_start',
+    'broker::runtime_stop',
+    'broker::runtime_logs',
+  ]) expect(lib).toContain(command)
   expect(lib).not.toContain('shell')
   expect(core).toContain('pub const WSL_EXE: &str = "wsl.exe"')
   expect(core).toContain('pub const WSL_STATUS_ARGS: [&str; 1] = ["--status"]')
-  expect(broker).toContain('Command::new(WSL_EXE).args(WSL_STATUS_ARGS)')
-  expect(build).toContain('commands(&["runtime_status"])')
+  expect(core).toContain('RUNTIME_BOOTSTRAP_UNIT: &str = "rhodiz-harness-bootstrap.service"')
+  expect(core).toContain('pub const MAX_LOG_LINES: u16 = 500')
+  expect(core).toContain('signed runtime manifest verification is required')
+  expect(broker).toContain('runtime_logs(lines: Option<u16>)')
+  expect(broker).not.toMatch(/runtime_(?:start|stop|provision)\([^)]*String/)
+  for (const command of [
+    '"runtime_status"',
+    '"runtime_provision"',
+    '"runtime_start"',
+    '"runtime_stop"',
+    '"runtime_logs"',
+  ]) expect(build).toContain(command)
 })
+
+test('the broker resolves wsl.exe from an absolute system path, never from PATH', async () => {
+  const broker = await read('src-tauri/src/broker.rs')
+  expect(broker).toContain('env::var_os("SystemRoot")')
+  expect(broker).toContain('.join("System32").join(WSL_EXE)')
+  // A bare Command::new(WSL_EXE) would resolve through PATH, which is ambient
+  // authority the fail-closed baseline does not grant.
+  expect(broker).not.toContain('Command::new(WSL_EXE)')
+})
+
+test('lifecycle mutations are serialized and never flash a console window', async () => {
+  const broker = await read('src-tauri/src/broker.rs')
+  expect(broker).toContain('.creation_flags(CREATE_NO_WINDOW)')
+  expect(broker).toContain('with_lifecycle_lock(RuntimeOperation::Start')
+  expect(broker).toContain('with_lifecycle_lock(RuntimeOperation::Stop')
+  // Every command that waits on wsl.exe must leave the UI thread, or the window
+  // freezes for up to COMMAND_TIMEOUT_SECS.
+  for (const command of ['runtime_status', 'runtime_start', 'runtime_stop', 'runtime_logs']) {
+    expect(broker).toMatch(
+      new RegExp(String.raw`#\[tauri::command\(async\)\]\s*pub fn ${command}\(`),
+    )
+  }
+})
+
+test('log redaction matches credential prefixes only at token boundaries', async () => {
+  const core = await read('src-tauri/broker-core/src/lib.rs')
+  expect(core).toContain('SENSITIVE_TOKEN_PREFIXES')
+  expect(core).toContain('fn has_sensitive_token_prefix')
+  expect(core).toContain('[REDACTED SENSITIVE LOG LINE]')
+})
+
 test('provenance anchors all three approved source repositories at exact commits', async () => {
   const provenance = await read('PROVENANCE.md')
   expect(provenance).toContain('a0403035a20c91decadd011b907ee5b489f6788b')
