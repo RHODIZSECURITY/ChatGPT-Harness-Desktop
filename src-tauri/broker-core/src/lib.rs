@@ -431,6 +431,90 @@ pub fn provisioning_blocked() -> RuntimeOperationResult {
 /// Probe used to determine the installed WSL version.
 pub const WSL_VERSION_ARGS: [&str; 1] = ["--version"];
 
+/// Tears the distro down so the next start boots it fresh.
+///
+/// Required after writing `/etc/wsl.conf`: WSL reads that file at boot, so a
+/// running distro keeps the configuration it started with and systemd would
+/// appear not to have been enabled.
+pub const WSL_TERMINATE_ARGS: [&str; 2] = ["--terminate", MANAGED_DISTRO_NAME];
+
+/// Written to `/etc/wsl.conf` to turn systemd on inside the managed distro.
+///
+/// A trailing newline because this is a whole file, not a fragment.
+pub const WSL_CONF_CONTENTS: &str = "[boot]\nsystemd=true\n";
+
+/// Writes `/etc/wsl.conf` from stdin.
+///
+/// `tee` rather than a shell. The obvious spelling is
+/// `bash -c "echo ... > /etc/wsl.conf"`, and it is wrong here for the same
+/// reason every other vector in this module avoids a shell: it hands a string
+/// to an interpreter that assigns meaning to characters inside it. `tee`
+/// reads the bytes from stdin and writes them, so the content never passes
+/// through anything that could interpret it, and the argument vector stays
+/// fixed and auditable.
+pub const WSL_WRITE_CONF_ARGS: [&str; 6] = [
+    "--distribution",
+    MANAGED_DISTRO_NAME,
+    "--user",
+    "root",
+    "--exec",
+    "tee",
+];
+
+/// Why an import was refused before `wsl.exe` was ever spawned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportArgsError {
+    /// A path that `wsl.exe` would read as a flag rather than a path.
+    PathLooksLikeAFlag,
+    /// An empty path.
+    PathEmpty,
+}
+
+impl ImportArgsError {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::PathLooksLikeAFlag => {
+                "a path beginning with '-' would be parsed as a flag; refusing to provision"
+            }
+            Self::PathEmpty => "an empty path cannot be imported; refusing to provision",
+        }
+    }
+}
+
+/// Builds the argument vector that imports the runtime rootfs.
+///
+/// Unlike every other vector here this one cannot be a constant, because two
+/// of its arguments are paths chosen at runtime. That is exactly why it
+/// validates: a path beginning with `-` is indistinguishable from a flag once
+/// it is in the vector, so `--import` would silently take the next real
+/// argument as its value. Refused here rather than defended against later.
+///
+/// `--version 2` is pinned and not a parameter. WSL1 has no systemd and no
+/// working Docker, so importing under it produces a distro that fails much
+/// later and much less legibly than a refusal here would.
+pub fn wsl_import_args(
+    install_dir: &str,
+    rootfs_tarball: &str,
+) -> Result<Vec<String>, ImportArgsError> {
+    for path in [install_dir, rootfs_tarball] {
+        if path.is_empty() {
+            return Err(ImportArgsError::PathEmpty);
+        }
+        if path.starts_with('-') {
+            return Err(ImportArgsError::PathLooksLikeAFlag);
+        }
+    }
+
+    Ok(vec![
+        "--import".to_string(),
+        MANAGED_DISTRO_NAME.to_string(),
+        install_dir.to_string(),
+        rootfs_tarball.to_string(),
+        "--version".to_string(),
+        "2".to_string(),
+    ])
+}
+
 /// Interim floor for the WSL2 feature set the broker relies on. The release
 /// manifest (task 4.4) is the final authority for the minimum; until it
 /// exists this constant is the explicit, reviewable stand-in and is written
@@ -1037,5 +1121,87 @@ mod tests {
         let exited = provisioning_preflight(CommandOutcome::Exit(7), None);
         assert_eq!(exited.state, OperationState::Blocked);
         assert!(exited.detail.unwrap().contains("7"));
+    }
+
+    #[test]
+    fn provisioning_arg_vectors_are_fixed_shell_free_and_pin_the_distro() {
+        assert_eq!(WSL_TERMINATE_ARGS, ["--terminate", MANAGED_DISTRO_NAME]);
+        assert_eq!(WSL_WRITE_CONF_ARGS[1], MANAGED_DISTRO_NAME);
+        assert_eq!(WSL_WRITE_CONF_ARGS[5], "tee");
+
+        // The same shell-freedom the lifecycle vectors hold. Writing a config
+        // file is where a shell is most tempting and least defensible.
+        for arg in WSL_WRITE_CONF_ARGS.iter().chain(WSL_TERMINATE_ARGS.iter()) {
+            assert!(*arg != "sh" && *arg != "bash", "{arg} is a shell");
+            assert!(!arg.contains("powershell"));
+            assert!(!arg.contains("cmd.exe"));
+            // No redirection, no separators: nothing that only means anything
+            // to an interpreter.
+            assert!(!arg.contains('>') && !arg.contains('|') && !arg.contains(';'));
+        }
+    }
+
+    #[test]
+    fn the_wsl_conf_we_write_enables_systemd_and_is_a_whole_file() {
+        assert_eq!(WSL_CONF_CONTENTS, "[boot]\nsystemd=true\n");
+        assert!(
+            WSL_CONF_CONTENTS.ends_with('\n'),
+            "a config file without a final newline is a fragment"
+        );
+    }
+
+    #[test]
+    fn an_import_pins_the_distro_and_wsl2() {
+        let args = wsl_import_args(
+            r"C:\ProgramData\RHODIZ\distro",
+            r"C:\ProgramData\RHODIZ\rootfs.tar",
+        )
+        .expect("ordinary Windows paths must be accepted");
+        assert_eq!(args[0], "--import");
+        assert_eq!(args[1], MANAGED_DISTRO_NAME);
+        assert_eq!(
+            &args[4..],
+            ["--version", "2"],
+            "WSL1 has no systemd and no working Docker; the version is not a parameter"
+        );
+    }
+
+    #[test]
+    fn a_path_that_would_be_read_as_a_flag_is_refused_before_spawning() {
+        // Argument injection, not shell injection: there is no shell here, but
+        // `--import` takes positional values, so a path beginning with '-'
+        // would be consumed as a flag and the next real argument taken as the
+        // value. Caught before wsl.exe ever runs.
+        assert_eq!(
+            wsl_import_args("--version", "/tmp/rootfs.tar"),
+            Err(ImportArgsError::PathLooksLikeAFlag)
+        );
+        assert_eq!(
+            wsl_import_args("/tmp/dir", "--version"),
+            Err(ImportArgsError::PathLooksLikeAFlag)
+        );
+        assert_eq!(
+            wsl_import_args("", "/tmp/rootfs.tar"),
+            Err(ImportArgsError::PathEmpty)
+        );
+        for error in [
+            ImportArgsError::PathLooksLikeAFlag,
+            ImportArgsError::PathEmpty,
+        ] {
+            assert!(error.message().ends_with("; refusing to provision"));
+        }
+    }
+
+    #[test]
+    fn a_path_containing_shell_metacharacters_is_passed_through_untouched() {
+        // Deliberately NOT rejected. There is no shell in the vector, so a
+        // space or an ampersand in a Windows path is just a character. A
+        // filter here would reject legitimate paths while protecting against
+        // an interpreter that is not being invoked, and would suggest the
+        // vector is unsafe without one.
+        let args = wsl_import_args(r"C:\Users\Ada & Co\distro", r"C:\tmp\root fs.tar")
+            .expect("paths with spaces and ampersands are ordinary on Windows");
+        assert_eq!(args[2], r"C:\Users\Ada & Co\distro");
+        assert_eq!(args[3], r"C:\tmp\root fs.tar");
     }
 }
