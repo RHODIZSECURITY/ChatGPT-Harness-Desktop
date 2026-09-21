@@ -207,3 +207,29 @@ environment with WSL2, which a CI type-check is not.
 The relay can exercise the pure Rust broker and cross-check the Windows Tauri code path, but it is not a Windows host. Native WebView2 behavior, WSL2 installation/provisioning, MSI/NSIS packaging, reboot recovery, Windows firewall behavior and signed updater flows remain uncertified until executed on an approved Windows test environment.
 
 A Linux cross-check must never be reported as native Windows certification.
+
+## Merge gate to `main` — closed until all three conditions hold
+
+Nothing in this repository merges to `main` unless **all** of these are true,
+because the stack enters `main` in order and a green cross-check is not runtime
+certification:
+
+1. **Flujo inquebrantable**: `npm run verify:portable` green end to end on the
+   candidate SHA, plus `check:tauri` and `clippy:tauri` with warnings denied —
+   the gate that actually compiles `broker.rs`.
+   Current status: ✅ green (last full run: 2026-09-21, SHA `0559336`).
+2. **CI verde**: all checks green on the candidate SHA for every PR in the
+   stack. Current status: ✅ #1–#5 all green on their current heads.
+3. **E2E verde**: plan section 10 tasks (clean Windows 11 host, WSL
+   absent/present/outdated paths, reboot recovery, Docker failure, digests,
+   loopback under VPN, rollback, uninstall, installer + signing, full Windows
+   E2E) passed on an approved Windows test environment. **Sección 10 prohíbe
+   terminantemente evidencia Linux.** Current status: ❌ — no Windows host
+   exists in this environment; nothing in section 10 has run.
+
+Final acceptance additionally requires the plan (11.7): **autorización
+explícita del operador** before release.
+
+Enforcement: the operator's standing order is that a merge to `main` with the
+E2E condition unsatisfied is a violation. This section exists so the gate is a
+recorded matter of fact, not a remembered instruction.
