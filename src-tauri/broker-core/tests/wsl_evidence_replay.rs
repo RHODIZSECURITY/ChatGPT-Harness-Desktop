@@ -132,6 +132,16 @@ fn captured_wsl_output_decodes_and_scans() {
             "{name}: wsl.exe was present but the version probe did not run"
         );
 
+        // A host can carry the wsl.exe launcher without a usable WSL install,
+        // in which case --version exits nonzero and prints nothing worth
+        // decoding. The broker classifies that as not-probeable and blocks, so
+        // the replay records it the same way instead of demanding a version.
+        let exit_code = probe["exitCode"].as_i64();
+        if exit_code != Some(0) {
+            eprintln!("{name}: wsl.exe --version exited {exit_code:?}; not probeable");
+            continue;
+        }
+
         let encoded = probe["stdoutBase64"]
             .as_str()
             .unwrap_or_else(|| panic!("{name}: stdoutBase64 missing"));

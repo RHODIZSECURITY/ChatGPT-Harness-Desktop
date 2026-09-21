@@ -120,8 +120,18 @@ $document = [ordered]@{
 }
 
 if (-not $OutFile) {
-    $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-    $OutFile = Join-Path $repoRoot "evidence/windows/wsl-probe-$Label.json"
+    # This script is meant to be copied onto a Windows host on its own, so the
+    # repository layout cannot be assumed. Write into evidence/windows/ only
+    # when the script really is sitting inside a checkout; otherwise write
+    # beside the script, where the operator will actually find the file.
+    $here = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+    $repoRoot = Split-Path -Parent (Split-Path -Parent $here)
+    # src-tauri/broker-core is what consumes these captures, so its presence is
+    # the marker that this really is a checkout and not a loose copy.
+    $inCheckout = $repoRoot -and
+        (Test-Path -LiteralPath (Join-Path $repoRoot 'src-tauri/broker-core'))
+    $targetDir = if ($inCheckout) { Join-Path $repoRoot 'evidence/windows' } else { $here }
+    $OutFile = Join-Path $targetDir "wsl-probe-$Label.json"
 }
 $outDir = Split-Path -Parent $OutFile
 if ($outDir -and -not (Test-Path -LiteralPath $outDir)) {
