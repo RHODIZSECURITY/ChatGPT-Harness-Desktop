@@ -21,3 +21,4 @@ tauri-build = { version = "=2.6.3" }
 [dependencies]
 rhodiz-harness-broker-core = { path = "broker-core" }
 tauri = { version = "=2.11.5" }
+wait-timeout = "=0.2.1"

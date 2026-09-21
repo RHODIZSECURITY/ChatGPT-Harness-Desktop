@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-runtime-provision"
+description = "Enables the runtime_provision command without any pre-configured scope."
+commands.allow = ["runtime_provision"]
+
+[[permission]]
+identifier = "deny-runtime-provision"
+description = "Denies the runtime_provision command without any pre-configured scope."
+commands.deny = ["runtime_provision"]

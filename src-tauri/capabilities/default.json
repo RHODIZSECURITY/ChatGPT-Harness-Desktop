@@ -1,9 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "main-runtime-status",
-  "description": "Allow the local main window to query sanitized runtime status only.",
+  "identifier": "main-runtime-lifecycle",
+  "description": "Allow the local main window to use the bounded RHODIZ Harness runtime lifecycle API.",
   "windows": ["main"],
   "local": true,
   "platforms": ["windows"],
-  "permissions": ["allow-runtime-status"]
+  "permissions": [
+    "allow-runtime-status",
+    "allow-runtime-provision",
+    "allow-runtime-start",
+    "allow-runtime-stop",
+    "allow-runtime-logs"
+  ]
 }

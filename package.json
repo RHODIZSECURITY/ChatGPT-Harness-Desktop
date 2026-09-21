@@ -13,10 +13,11 @@
     "fmt:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
     "clippy:rust": "cargo clippy --manifest-path src-tauri/Cargo.toml -p rhodiz-harness-broker-core --all-targets -- -D warnings",
     "check:tauri": "cargo check --manifest-path src-tauri/Cargo.toml --tests",
+    "clippy:tauri": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "tauri": "tauri",
     "verify": "npm run verify:portable",
     "verify:portable": "npm run lint && npm run test:coverage && npm run build && npm run fmt:rust && npm run test:rust && npm run clippy:rust",
-    "verify:windows": "npm run verify:portable && npm run check:tauri"
+    "verify:windows": "npm run verify:portable && npm run check:tauri && npm run clippy:tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
