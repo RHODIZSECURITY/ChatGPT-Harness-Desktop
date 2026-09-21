@@ -206,6 +206,10 @@ fn acquire_cross_process_lock() -> Option<std::fs::File> {
     OpenOptions::new()
         .create(true)
         .write(true)
+        // The file is a lock, not data: its content is never read, so the
+        // existing bytes are left untouched and the truncation question the
+        // linter asks is answered explicitly as "no".
+        .truncate(false)
         .share_mode(0)
         .open(directory.join(LIFECYCLE_LOCK_FILE))
         .ok()
