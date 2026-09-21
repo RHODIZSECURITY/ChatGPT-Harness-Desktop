@@ -3,7 +3,14 @@ name = "rhodiz-harness-broker-core"
 version = "0.1.0"
 publish = false
 edition = "2021"
-rust-version = "1.77.2"
+# ed25519-dalek 3.0.0 declares rust-version 1.85. The workspace toolchain is
+# pinned at 1.98.1, so this is a truthful declaration rather than a constraint
+# anything here has to satisfy at build time.
+rust-version = "1.85"
 
 [dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
+# Verification only: no rand (we never generate keys), no alloc, no serde.
+# Ed25519 is chosen because verification needs no ASN.1/DER decoding, which
+# would itself reintroduce a parse-before-verify step inside the verifier.
+ed25519-dalek = { version = "=3.0.0", default-features = false }

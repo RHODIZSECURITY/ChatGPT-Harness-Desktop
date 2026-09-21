@@ -29,3 +29,6 @@ dist-ssr
 .cargo/
 coverage/
 src-tauri/target/
+
+# Local test reporter artifacts
+.vitest/

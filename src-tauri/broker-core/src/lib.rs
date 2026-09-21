@@ -1,5 +1,17 @@
 use serde::Serialize;
 
+/// Detached-signature verification for the release manifest. It lives in its
+/// own module because the ordering it enforces — verify the exact bytes
+/// before anything parses them — is a property of that module's types, and
+/// keeping the verifier's constructor private to it is what makes the
+/// ordering unforgeable from here.
+pub mod manifest;
+
+pub use manifest::{
+    verify_manifest_with_key, verify_release_manifest, ManifestVerifyError, VerifiedManifestBytes,
+    MANIFEST_PUBLIC_KEY, MAX_MANIFEST_BYTES,
+};
+
 pub const MANAGED_DISTRO_NAME: &str = "RHODIZ-Harness";
 pub const RUNTIME_BOOTSTRAP_UNIT: &str = "rhodiz-harness-bootstrap.service";
 pub const WSL_EXE: &str = "wsl.exe";

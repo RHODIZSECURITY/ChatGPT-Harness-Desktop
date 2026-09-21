@@ -249,3 +249,52 @@ test('every Provision outcome carries a detail string', async () => {
   const someCount = (preflightFn.match(/=> Some\(/g) || []).length
   expect(someCount).toBeGreaterThanOrEqual(5)
 })
+
+// design.md §105 is explicit that the broker verifies the signature over the
+// exact manifest bytes *before* parsing any URL, version or digest, and that
+// parsing first is a design failure rather than an optimisation. The module
+// enforces that ordering through its types, not a comment, so pin the
+// structural properties that make the enforcement real: a comment can be
+// deleted without any test noticing, but these cannot.
+test('manifest signature verification is enforced before any parse', async () => {
+  const manifest = await read('src-tauri/broker-core/src/manifest.rs')
+
+  // The handle that carries verified bytes has a private field and no
+  // exported constructor, so a caller cannot fabricate one and parse first.
+  // Widening the tuple field to `pub` would silently make the ordering
+  // optional again.
+  expect(manifest).toContain("pub struct VerifiedManifestBytes<'a>(&'a [u8])")
+  expect(manifest).not.toMatch(/pub struct VerifiedManifestBytes<'a>\(pub /)
+
+  // verify_strict, not verify: the strict form rejects small-order keys and
+  // torsion components, which is what removes signature malleability.
+  expect(manifest).toContain('.verify_strict(manifest, &Signature::from_bytes(signature_bytes))')
+  expect(manifest).not.toMatch(/\.verify\(manifest/)
+
+  // VerifyingKey::from_bytes accepts the all-zero key, so key construction is
+  // not a filter on its own.
+  expect(manifest).toContain('if key.is_weak()')
+
+  // The verifier hashes the whole input, so an unbounded read would let
+  // whoever serves the manifest choose how much work the broker does.
+  expect(manifest).toContain('pub const MAX_MANIFEST_BYTES: usize = 64 * 1024')
+  expect(manifest).toContain('ManifestVerifyError::ManifestTooLarge')
+
+  // No release signing key exists yet. `None` keeps the release path refusing
+  // every input; a placeholder would look like a configured trust anchor
+  // while authenticating nothing.
+  expect(manifest).toContain(
+    'pub const MANIFEST_PUBLIC_KEY: Option<[u8; MANIFEST_PUBLIC_KEY_LEN]> = None',
+  )
+  expect(manifest).toContain('return Err(ManifestVerifyError::NoTrustAnchor)')
+
+  // The verified handle hands back the exact bytes the signature covered.
+  // Re-encoding or normalising here would mean parsing something the
+  // signature never authenticated.
+  expect(manifest).toMatch(/pub fn as_bytes\(&self\) -> &'a \[u8\] \{\s*self\.0\s*\}/)
+
+  // The module must be reachable from the broker, or none of the above binds
+  // anything.
+  const core = await read('src-tauri/broker-core/src/lib.rs')
+  expect(core).toContain('pub mod manifest;')
+})
