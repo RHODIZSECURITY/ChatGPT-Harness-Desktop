@@ -74,7 +74,7 @@ impl ImageRef {
         let Some(hex) = self.digest.strip_prefix("sha256:") else {
             return false;
         };
-        hex.len() == SHA256_HEX_LEN && hex.bytes().all(|b| b.is_ascii_hexdigit())
+        hex.len() == SHA256_HEX_LEN && hex.bytes().all(is_lowercase_hex)
     }
 }
 
@@ -268,6 +268,166 @@ pub fn advanced_rollback_floor(
         Some(installed) => declared.max(installed.rollback_floor),
         None => declared,
     }
+}
+
+/// A runtime bundle: the manifest's runtime section resolved into references
+/// that can be handed to whatever pulls the images.
+///
+/// This type exists so that no code downstream ever holds a `repository` and a
+/// `digest` as two strings it has to remember to join correctly. The map is
+/// private and the only way a reference leaves this type is fully qualified as
+/// `repository@sha256:<hex>`, so there is no path from a bundle back to a tag.
+///
+/// The invariant is re-established here rather than inherited. `ReleaseManifest`
+/// has public fields, so one can be built without going through the parser; a
+/// bundle that trusted its input would be exactly as pinned as its caller
+/// happened to be.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeBundle {
+    bundle_version: String,
+    compose_sha256: String,
+    images: std::collections::BTreeMap<String, String>,
+}
+
+impl RuntimeBundle {
+    /// The version this bundle as a whole was published under.
+    pub fn bundle_version(&self) -> &str {
+        &self.bundle_version
+    }
+
+    /// The compose file's digest, as bare hex with no `sha256:` prefix.
+    pub fn compose_sha256(&self) -> &str {
+        &self.compose_sha256
+    }
+
+    /// The pinned reference for one role, or `None` if this release does not
+    /// carry that role.
+    pub fn image(&self, role: &str) -> Option<&str> {
+        self.images.get(role).map(String::as_str)
+    }
+
+    /// Every `(role, pinned reference)` pair, in role order.
+    pub fn images(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.images.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+}
+
+/// Why a runtime section could not be turned into a bundle.
+///
+/// Unlike the other errors in this crate these carry the offending role, so
+/// `message` returns an owned `String`: an operator reading "a repository is
+/// malformed" across five roles learns almost nothing, and the role name is
+/// only known at runtime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BundleError {
+    /// The release carries no images at all. A signed manifest with an empty
+    /// image set passes every per-image check vacuously, so it is refused
+    /// explicitly: an empty runtime is not a runtime.
+    NoImages,
+    /// `compose_sha256` is not a bare 64-character lowercase hex digest.
+    ComposeDigestUnpinned,
+    /// A repository name is empty.
+    RepositoryEmpty { role: String },
+    /// A repository name already carries a tag or a digest of its own, so
+    /// appending ours would produce a reference with two of them.
+    RepositoryCarriesItsOwnReference { role: String },
+    /// An image digest is not a literal `sha256:<64 lowercase hex>`.
+    ImageUnpinned { role: String },
+}
+
+impl BundleError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::NoImages => {
+                "the release manifest names no runtime images; refusing to provision".to_string()
+            }
+            Self::ComposeDigestUnpinned => {
+                "the release manifest's compose_sha256 is not a bare sha256 digest; \
+                 refusing to provision"
+                    .to_string()
+            }
+            Self::RepositoryEmpty { role } => {
+                format!("the image for role `{role}` has no repository; refusing to provision")
+            }
+            Self::RepositoryCarriesItsOwnReference { role } => format!(
+                "the repository for role `{role}` already carries a tag or digest; \
+                 refusing to provision"
+            ),
+            Self::ImageUnpinned { role } => format!(
+                "the image for role `{role}` is not pinned to a sha256 digest; \
+                 refusing to provision"
+            ),
+        }
+    }
+}
+
+/// Resolves a parsed manifest's runtime section into a [`RuntimeBundle`].
+///
+/// Every check here is a reason to refuse the whole release rather than to
+/// drop one role. A runtime missing a component installs and then fails in
+/// whatever way that component's absence happens to manifest, which is far
+/// harder to diagnose than a refusal naming the role.
+pub fn resolve_runtime_bundle(manifest: &ReleaseManifest) -> Result<RuntimeBundle, BundleError> {
+    let runtime = &manifest.runtime;
+
+    if runtime.images.is_empty() {
+        return Err(BundleError::NoImages);
+    }
+
+    // Bare hex, deliberately not `sha256:<hex>`. The compose digest is a file
+    // hash rather than an OCI descriptor, and accepting both spellings would
+    // mean two byte-different strings naming the same file.
+    if !is_bare_sha256_hex(&runtime.compose_sha256) {
+        return Err(BundleError::ComposeDigestUnpinned);
+    }
+
+    let mut images = std::collections::BTreeMap::new();
+    for (role, image) in &runtime.images {
+        if image.repository.is_empty() {
+            return Err(BundleError::RepositoryEmpty { role: role.clone() });
+        }
+        if repository_carries_its_own_reference(&image.repository) {
+            return Err(BundleError::RepositoryCarriesItsOwnReference { role: role.clone() });
+        }
+        if !image.is_pinned() {
+            return Err(BundleError::ImageUnpinned { role: role.clone() });
+        }
+        // `digest` still carries its `sha256:` prefix, which is what an OCI
+        // reference wants after the `@`.
+        images.insert(
+            role.clone(),
+            format!("{}@{}", image.repository, image.digest),
+        );
+    }
+
+    Ok(RuntimeBundle {
+        bundle_version: runtime.bundle_version.clone(),
+        compose_sha256: runtime.compose_sha256.clone(),
+        images,
+    })
+}
+
+fn is_lowercase_hex(byte: u8) -> bool {
+    matches!(byte, b'0'..=b'9' | b'a'..=b'f')
+}
+
+fn is_bare_sha256_hex(value: &str) -> bool {
+    value.len() == SHA256_HEX_LEN && value.bytes().all(is_lowercase_hex)
+}
+
+/// Whether a repository name already names a specific image.
+///
+/// A colon is only a tag separator in the final path segment: a registry host
+/// may carry a port, as in `localhost:5000/rhodiz/core`, and rejecting that
+/// would refuse a legitimate private registry.
+fn repository_carries_its_own_reference(repository: &str) -> bool {
+    if repository.contains('@') {
+        return true;
+    }
+    let last_segment = repository
+        .rsplit_once('/')
+        .map_or(repository, |(_, segment)| segment);
+    last_segment.contains(':')
 }
 
 #[cfg(test)]
@@ -537,5 +697,184 @@ mod tests {
         let message = UpdateRefusal::BelowInstalledFloor.message();
         assert!(message.ends_with("; refusing to provision"));
         assert!(message.contains("anti-rollback floor"));
+    }
+
+    #[test]
+    fn an_uppercase_digest_is_refused() {
+        // OCI digests are `[a-f0-9]{64}`. Accepting uppercase would give the
+        // same image two spellings, and the whole point of pinning is that a
+        // reference can be compared byte for byte.
+        let json = String::from_utf8(CORE_MANIFEST.to_vec())
+            .expect("the vector is UTF-8")
+            .replace(
+                "sha256:0000000000000000000000000000000000000000000000000000000000000003",
+                "sha256:000000000000000000000000000000000000000000000000000000000000000A",
+            );
+        assert_eq!(
+            parse_resigned(&json),
+            Err(ManifestParseError::UnpinnedImage)
+        );
+    }
+
+    #[test]
+    fn a_bundle_renders_every_role_as_a_digest_pinned_reference() {
+        let manifest = parse_core_manifest().expect("Core's manifest must parse");
+        let bundle = resolve_runtime_bundle(&manifest).expect("Core's runtime must resolve");
+
+        assert_eq!(bundle.bundle_version(), "0.2.0");
+        assert_eq!(
+            bundle.compose_sha256(),
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
+        assert_eq!(
+            bundle.image("core"),
+            Some(
+                "rhodiz/chatgpt-arnes@sha256:\
+                 0000000000000000000000000000000000000000000000000000000000000000"
+            )
+        );
+        assert_eq!(
+            bundle.image("route"),
+            Some(
+                "ghcr.io/rhodizsecurity/route-image-placeholder@sha256:\
+                 0000000000000000000000000000000000000000000000000000000000000003"
+            )
+        );
+        assert_eq!(bundle.image("no-such-role"), None);
+
+        let roles: Vec<&str> = bundle.images().map(|(role, _)| role).collect();
+        assert_eq!(roles, ["core", "memory", "public", "route", "strands"]);
+        assert!(bundle
+            .images()
+            .all(|(_, reference)| reference.contains("@sha256:")));
+    }
+
+    #[test]
+    fn a_release_with_no_images_is_refused_rather_than_provisioned_empty() {
+        // Every per-image check passes vacuously over an empty map, so without
+        // this guard a signed manifest naming nothing would provision an empty
+        // runtime and report success.
+        let mut manifest = parse_core_manifest().expect("Core's manifest must parse");
+        manifest.runtime.images.clear();
+        assert_eq!(
+            resolve_runtime_bundle(&manifest),
+            Err(BundleError::NoImages)
+        );
+    }
+
+    #[test]
+    fn a_repository_that_already_carries_a_tag_is_refused() {
+        let mut manifest = parse_core_manifest().expect("Core's manifest must parse");
+        manifest
+            .runtime
+            .images
+            .get_mut("core")
+            .expect("the core role exists")
+            .repository = "rhodiz/chatgpt-arnes:latest".to_string();
+        assert_eq!(
+            resolve_runtime_bundle(&manifest),
+            Err(BundleError::RepositoryCarriesItsOwnReference {
+                role: "core".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn a_repository_that_already_carries_a_digest_is_refused() {
+        // Two forms, because the realistic one does not exercise the guard
+        // that catches it. `repo@sha256:<hex>` contains a colon, so the tag
+        // check would refuse it even with the `@` check gone; the second form
+        // has no colon and is the only input that isolates `@`.
+        for repository in [
+            "rhodiz/chatgpt-arnes@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "rhodiz/chatgpt-arnes@somedigest",
+        ] {
+            let mut manifest = parse_core_manifest().expect("Core's manifest must parse");
+            manifest
+                .runtime
+                .images
+                .get_mut("core")
+                .expect("the core role exists")
+                .repository = repository.to_string();
+            assert_eq!(
+                resolve_runtime_bundle(&manifest),
+                Err(BundleError::RepositoryCarriesItsOwnReference {
+                    role: "core".to_string()
+                }),
+                "{repository} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_registry_port_is_not_mistaken_for_a_tag() {
+        // The guard looks at the last path segment on purpose. A private
+        // registry on a port is ordinary, and refusing it would be a bug
+        // dressed as a security check.
+        let mut manifest = parse_core_manifest().expect("Core's manifest must parse");
+        manifest
+            .runtime
+            .images
+            .get_mut("core")
+            .expect("the core role exists")
+            .repository = "localhost:5000/rhodiz/chatgpt-arnes".to_string();
+        let bundle = resolve_runtime_bundle(&manifest).expect("a ported registry is legitimate");
+        assert_eq!(
+            bundle.image("core"),
+            Some(
+                "localhost:5000/rhodiz/chatgpt-arnes@sha256:\
+                 0000000000000000000000000000000000000000000000000000000000000000"
+            )
+        );
+    }
+
+    #[test]
+    fn a_prefixed_compose_digest_is_refused() {
+        // compose_sha256 is a file hash, not an OCI descriptor. One spelling
+        // only, so the value can be compared directly against a hash computed
+        // over the downloaded file.
+        let mut manifest = parse_core_manifest().expect("Core's manifest must parse");
+        manifest.runtime.compose_sha256 = format!("sha256:{}", manifest.runtime.compose_sha256);
+        assert_eq!(
+            resolve_runtime_bundle(&manifest),
+            Err(BundleError::ComposeDigestUnpinned)
+        );
+    }
+
+    #[test]
+    fn a_tag_cannot_reach_a_bundle_even_when_the_parser_was_bypassed() {
+        // ReleaseManifest has public fields, so a manifest can exist without
+        // ever having been parsed. The bundle re-checks rather than inheriting
+        // the parser's guarantee.
+        let mut manifest = parse_core_manifest().expect("Core's manifest must parse");
+        manifest
+            .runtime
+            .images
+            .get_mut("strands")
+            .expect("the strands role exists")
+            .digest = "latest".to_string();
+        assert_eq!(
+            resolve_runtime_bundle(&manifest),
+            Err(BundleError::ImageUnpinned {
+                role: "strands".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn an_empty_repository_is_refused() {
+        let mut manifest = parse_core_manifest().expect("Core's manifest must parse");
+        manifest
+            .runtime
+            .images
+            .get_mut("public")
+            .expect("the public role exists")
+            .repository = String::new();
+        assert_eq!(
+            resolve_runtime_bundle(&manifest),
+            Err(BundleError::RepositoryEmpty {
+                role: "public".to_string()
+            })
+        );
     }
 }
