@@ -104,3 +104,14 @@ que no admite evidencia obtenida en Linux.
 siguen siendo ciertas sobre el frente completo; no se reescriben aquí para no
 falsear la copia. Si esta copia pasa a ser la fuente única, ese bloque es lo
 primero que hay que actualizar.
+
+## Tarea 0.6 cerrada en el Desktop (2026-09-20)
+
+Tarea 0.6 *"Referenciar este plan desde el repositorio del cliente y prohibir
+explícitamente una hoja de ruta Desktop paralela"* está cerrada en este repo:
+`README.md` referencia `openspec/changes/harness-desktop/` como único plan de
+ejecución, declara que el progreso se anota solo en esta nota, que `tasks.md`
+permanece byte-idéntico a la copia canónica de Core y que una hoja de ruta
+Desktop paralela queda prohibida. Commit `aeafbd7` en la rama
+`docs/openspec-harness-desktop-plan-20260920` (PR #3). La casilla en `tasks.md`
+no se marca aquí por diseño: esa copia permanece byte-idéntica a la canónica.
