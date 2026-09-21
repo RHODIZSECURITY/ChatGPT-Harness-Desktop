@@ -176,6 +176,100 @@ pub fn parse_release_manifest(
     Ok(manifest)
 }
 
+/// What this machine already has, as far as it can tell.
+///
+/// The floor travels with the *installed* state rather than being read from
+/// the candidate, and that is the whole security content of this type. An old
+/// release is genuinely signed — replaying one is the rollback attack, not a
+/// forgery — and it carries its own, lower
+/// `compatibility.minimum_rollback_sequence`. Honouring the candidate's floor
+/// would let the attacker choose the bar they have to clear.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InstalledRelease {
+    pub sequence: u64,
+    /// The highest floor this machine has ever been told to respect.
+    pub rollback_floor: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateDecision {
+    /// Nothing is installed; this is a first provision.
+    Install,
+    /// A higher sequence than what is installed.
+    Upgrade,
+    /// A lower sequence than what is installed but at or above the floor, so
+    /// it is a rollback the operator is allowed to perform.
+    RollBackWithinBounds,
+    /// Already running exactly this sequence.
+    AlreadyCurrent,
+    Refused(UpdateRefusal),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateRefusal {
+    /// Below the floor this machine is holding.
+    BelowInstalledFloor,
+}
+
+impl UpdateRefusal {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::BelowInstalledFloor => {
+                "the candidate release is older than this machine's anti-rollback floor; \
+                 refusing to provision"
+            }
+        }
+    }
+}
+
+/// Decides whether a verified, parsed manifest may be installed here.
+///
+/// Separate from parsing because it needs something no manifest can contain:
+/// what is already on this machine. A manifest is the same bytes everywhere;
+/// this answer is not.
+///
+/// Rollback is bounded rather than forbidden — an operator has to be able to
+/// return to a known-good release — so a lower sequence is permitted down to
+/// and including the installed floor.
+pub fn decide_update(
+    candidate: &ReleaseManifest,
+    installed: Option<InstalledRelease>,
+) -> UpdateDecision {
+    let Some(installed) = installed else {
+        // Nothing installed. The parser has already refused a manifest below
+        // its own declared floor, and there is no local floor yet that a
+        // candidate could lower, so using the candidate's floor is safe here
+        // in a way it is not below.
+        return UpdateDecision::Install;
+    };
+
+    if candidate.release_sequence < installed.rollback_floor {
+        return UpdateDecision::Refused(UpdateRefusal::BelowInstalledFloor);
+    }
+
+    match candidate.release_sequence.cmp(&installed.sequence) {
+        std::cmp::Ordering::Greater => UpdateDecision::Upgrade,
+        std::cmp::Ordering::Equal => UpdateDecision::AlreadyCurrent,
+        std::cmp::Ordering::Less => UpdateDecision::RollBackWithinBounds,
+    }
+}
+
+/// The floor to persist after acting on `candidate`.
+///
+/// Monotonic by construction: a manifest can raise this machine's floor and
+/// can never lower it. That is what stops a replayed old release from
+/// resetting the bar for the release after it.
+pub fn advanced_rollback_floor(
+    candidate: &ReleaseManifest,
+    installed: Option<InstalledRelease>,
+) -> u64 {
+    let declared = candidate.compatibility.minimum_rollback_sequence;
+    match installed {
+        Some(installed) => declared.max(installed.rollback_floor),
+        None => declared,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,5 +436,106 @@ mod tests {
                 assert_ne!(error.message(), other.message());
             }
         }
+    }
+
+    // ---- anti-rollback ----
+
+    fn manifest_at(sequence: u64, floor: u64) -> ReleaseManifest {
+        let mut m = parse_core_manifest().expect("Core's manifest must parse");
+        m.release_sequence = sequence;
+        m.compatibility.minimum_rollback_sequence = floor;
+        m
+    }
+
+    #[test]
+    fn a_first_provision_is_allowed_with_nothing_installed() {
+        assert_eq!(
+            decide_update(&manifest_at(2, 1), None),
+            UpdateDecision::Install
+        );
+    }
+
+    #[test]
+    fn a_higher_sequence_upgrades_and_the_same_one_is_a_no_op() {
+        let installed = InstalledRelease {
+            sequence: 5,
+            rollback_floor: 3,
+        };
+        assert_eq!(
+            decide_update(&manifest_at(6, 1), Some(installed)),
+            UpdateDecision::Upgrade
+        );
+        assert_eq!(
+            decide_update(&manifest_at(5, 1), Some(installed)),
+            UpdateDecision::AlreadyCurrent
+        );
+    }
+
+    #[test]
+    fn rollback_is_bounded_rather_than_forbidden() {
+        // An operator has to be able to return to a known-good release, so a
+        // lower sequence is allowed down to and including the floor.
+        let installed = InstalledRelease {
+            sequence: 9,
+            rollback_floor: 4,
+        };
+        assert_eq!(
+            decide_update(&manifest_at(5, 1), Some(installed)),
+            UpdateDecision::RollBackWithinBounds
+        );
+        assert_eq!(
+            decide_update(&manifest_at(4, 1), Some(installed)),
+            UpdateDecision::RollBackWithinBounds,
+            "the floor itself must be reachable; a floor you cannot return to is one higher than stated"
+        );
+        assert_eq!(
+            decide_update(&manifest_at(3, 1), Some(installed)),
+            UpdateDecision::Refused(UpdateRefusal::BelowInstalledFloor)
+        );
+    }
+
+    #[test]
+    fn a_replayed_release_cannot_lower_the_bar_with_its_own_floor() {
+        // The attack this exists to stop. An old release is genuinely signed
+        // — replaying one is not forgery — and it declares its own, lower
+        // minimum_rollback_sequence. If the decision honoured the candidate's
+        // floor, the attacker would be choosing the bar they have to clear.
+        let installed = InstalledRelease {
+            sequence: 9,
+            rollback_floor: 8,
+        };
+        let ancient_but_validly_signed = manifest_at(2, 1);
+        assert_eq!(
+            decide_update(&ancient_but_validly_signed, Some(installed)),
+            UpdateDecision::Refused(UpdateRefusal::BelowInstalledFloor),
+            "the candidate's own floor of 1 must not override the installed floor of 8"
+        );
+    }
+
+    #[test]
+    fn the_floor_only_ever_rises() {
+        let installed = InstalledRelease {
+            sequence: 9,
+            rollback_floor: 8,
+        };
+        // A manifest may raise it,
+        assert_eq!(
+            advanced_rollback_floor(&manifest_at(10, 12), Some(installed)),
+            12
+        );
+        // and may never lower it, however validly it is signed.
+        assert_eq!(
+            advanced_rollback_floor(&manifest_at(10, 2), Some(installed)),
+            8
+        );
+        // With nothing installed there is no local floor to protect.
+        assert_eq!(advanced_rollback_floor(&manifest_at(10, 2), None), 2);
+    }
+
+    #[test]
+    fn a_refusal_says_what_it_refused_and_that_it_refused() {
+        let message = UpdateRefusal::BelowInstalledFloor.message();
+        assert!(message.ends_with("; refusing to provision"));
+        assert!(message.contains("anti-rollback floor"));
     }
 }

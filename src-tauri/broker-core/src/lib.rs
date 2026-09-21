@@ -21,8 +21,9 @@ pub use manifest::{
 /// length constants are public because the error documentation refers to
 /// them, not because a caller needs to build a key or a signature by hand.
 pub use release::{
-    parse_release_manifest, Compatibility, DesktopRelease, ImageRef, ManifestParseError,
-    ProviderRelease, ReleaseManifest, RuntimeRelease, SUPPORTED_SCHEMA_VERSION,
+    advanced_rollback_floor, decide_update, parse_release_manifest, Compatibility, DesktopRelease,
+    ImageRef, InstalledRelease, ManifestParseError, ProviderRelease, ReleaseManifest,
+    RuntimeRelease, UpdateDecision, UpdateRefusal, SUPPORTED_SCHEMA_VERSION,
 };
 
 pub const MANAGED_DISTRO_NAME: &str = "RHODIZ-Harness";
