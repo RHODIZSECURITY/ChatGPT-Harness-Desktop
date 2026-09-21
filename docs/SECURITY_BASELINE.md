@@ -85,10 +85,7 @@ reported as `timed_out`, never as success.
   answers at all**, a second fixed `wsl.exe --version`. Gating the second spawn
   behind the first keeps an absent or wedged WSL to one `COMMAND_TIMEOUT_SECS`
   rather than two, and the preflight ignores the version on those branches
-  anyway. The four states are distinguished: WSL absent, WSL unprobeable, WSL
-  present but older than the pinned minimum, and WSL sufficient — where the
-  only remaining obstacle is the manifest gate, so that branch defers to the
-  same refusal message rather than restating it.
+  anyway. The four states are distinguished **in the `detail` string only** — every branch returns `OperationState::Blocked` because the signed manifest gate is the ultimate barrier. The states are: WSL absent, WSL unprobeable, WSL present but older than the pinned minimum, and WSL sufficient — where the only remaining obstacle is the manifest gate, so that branch defers to the same refusal message rather than restating it.
 
   **The one place the broker parses stdout for anything but logs.**
   `wsl.exe --version` writes UTF-16LE, so the version cannot be read from an
@@ -146,7 +143,7 @@ The five Windows warnings are upstream maintenance warnings, not known vulnerabi
 - Vitest: 17/17 PASS.
 - Executable TypeScript/React coverage: 100% statements, branches, functions and lines.
 - Production renderer build: PASS.
-- Rust broker-core: 17/17 PASS.
+- Rust broker-core: 26/26 PASS.
 - `cargo fmt --check`: PASS.
 - Clippy with `-D warnings`: PASS.
 - `npm run verify:portable`: PASS end to end.

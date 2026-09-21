@@ -237,3 +237,15 @@ test('the WSL version probe is a bounded, fail-closed exception to exit-code cla
     'the installed WSL version could not be determined; refusing to provision',
   )
 })
+
+// Every Provision result must carry a non-empty detail explaining the block.
+// The renderer must not be forced to guess why provisioning is blocked.
+test('every Provision outcome carries a detail string', async () => {
+  const core = await read('src-tauri/broker-core/src/lib.rs')
+  // provisioning_preflight uses a match expression assigning to a `detail` binding,
+  // then constructs RuntimeOperationResult { detail, ... }. Count Some(...) arms
+  // inside the match (5 branches set detail: Some(...), 1 returns early).
+  const preflightFn = core.slice(core.indexOf('pub fn provisioning_preflight'))
+  const someCount = (preflightFn.match(/=> Some\(/g) || []).length
+  expect(someCount).toBeGreaterThanOrEqual(5)
+})
