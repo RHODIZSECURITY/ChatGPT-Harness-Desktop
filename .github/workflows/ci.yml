@@ -11,6 +11,13 @@ on:
 permissions:
   contents: read
 
+env:
+  # A real Windows 11 capture now lives in evidence/windows/, so its absence is
+  # a regression rather than a known gap: deleting the capture must turn CI red
+  # instead of quietly restoring "no evidence, no opinion". Left unset locally,
+  # where a contributor with no captures is not doing anything wrong.
+  RHODIZ_REQUIRE_WSL_EVIDENCE: '1'
+
 concurrency:
   group: desktop-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

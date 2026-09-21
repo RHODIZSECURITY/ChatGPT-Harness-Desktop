@@ -13,10 +13,22 @@
     under test, so stdout and stderr are read straight off the process base
     stream and stored as base64.
 
-    Nothing about the machine is collected: no hostname, no user name, no paths,
-    no Windows build. The only identifying text in the output is the -Label you
-    pass. `wsl.exe --status` does print the default distro name; review the file
-    before committing it.
+    This script asks the machine nothing: it adds no hostname, no user name and
+    no paths of its own, and the only text it invents is the -Label you pass.
+
+    But it records what wsl.exe prints, and wsl.exe is chattier than its name
+    suggests. A real capture disclosed all of this:
+
+      - the exact Windows build and UBR ("Versión de Windows: 10.0.26200.9457")
+      - the WSL kernel and component versions (WSLg, MSRDC, Direct3D, DXCore),
+        one of which carries a servicing branch string
+      - the default distro name, from --status ("Ubuntu")
+      - the display language, because wsl.exe localizes its own labels
+
+    None of that is a secret, and all of it is the point: it is what makes the
+    capture evidence about a specific Windows rather than a shape. It is still
+    more than "nothing", so READ THE FILE BEFORE COMMITTING IT and decide for
+    yourself. Anything you are not willing to publish, do not commit.
 
 .PARAMETER Label
     Free-text note recorded with the capture, e.g. "win11-24h2-clean-vm".

@@ -434,6 +434,11 @@ pub const MINIMUM_WSL_VERSION: (u32, u32, u32) = (2, 0, 0);
 /// classification, and the only content it ever inspects is a version
 /// number. Accepts an optional BOM, stops at the first NUL, and fails closed
 /// (returns `None`) on anything it cannot decode exactly.
+///
+/// The captured output in `evidence/windows/` carries NO BOM, so the leading
+/// `FF FE` branch is defensive rather than the observed path. It stays because
+/// dropping it would make the decoder reject the one shape it cannot rule out,
+/// and a mis-decode here fails provisioning closed on a working install.
 pub fn decode_utf16le(bytes: &[u8]) -> Option<String> {
     let payload = if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
         &bytes[2..]
@@ -478,11 +483,20 @@ fn parse_dotted_component(bytes: &[u8], after: usize) -> Option<(u32, usize)> {
 }
 
 /// Extracts the first three dotted numeric components from WSL version text,
-/// matching `major.minor.patch` anywhere in it. The exact output format of
-/// `wsl.exe --version` is a documented assumption pending Windows
-/// certification: the probe is deliberately best-effort, and any failure to
-/// extract makes the caller fail closed rather than assume the minimum is
-/// met.
+/// matching `major.minor.patch` anywhere in it.
+///
+/// Deliberately label-free. Real `wsl.exe --version` output is localized — a
+/// Spanish Windows 11 host prints `Versión de WSL: 2.7.10.0` — so matching an
+/// English label would turn the display language into a supported-configuration
+/// question. The scan is certified against that capture
+/// (`evidence/windows/`, replayed by `tests/wsl_evidence_replay.rs`): it reads
+/// `2.7.10`, dropping the fourth component, past six further version lines that
+/// each carry dotted numbers of their own.
+///
+/// What remains assumed is that the WSL version is the FIRST such triple in the
+/// output. That held on the certified host and is not guaranteed by any
+/// documented contract, so the scan stays best-effort: any failure to extract
+/// makes the caller fail closed rather than assume the minimum is met.
 pub fn extract_wsl_version(text: &str) -> Option<(u32, u32, u32)> {
     let bytes = text.as_bytes();
     let mut start = 0;
@@ -958,10 +972,10 @@ mod tests {
         // not a supported-configuration question; this test is what keeps it
         // that way. The authoritative bytes live in evidence/windows/ and are
         // replayed by tests/wsl_evidence_replay.rs — this fixture is the same
-        // shape kept close to the function it constrains.
-        let localized = "Versión de WSL: 2.7.10.0\n\
-                         Versión de kernel: 6.18.33.2-2\n\
-                         Versión de WSLg: 1.0.68";
+        // shape, transcribed from the first three lines of that capture.
+        let localized = "Versión de WSL: 2.7.10.0\r\n\
+                         Versión de kernel: 6.18.33.2-2\r\n\
+                         Versión de WSLg: 1.0.73.2\r\n";
         assert_eq!(extract_wsl_version(localized), Some((2, 7, 10)));
     }
 
