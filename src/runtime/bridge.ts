@@ -3,6 +3,7 @@ import type {
   RuntimeLogsResult,
   RuntimeOperationResult,
   RuntimeStatus,
+  RuntimeVerifyResult,
 } from './types'
 
 export const DEFAULT_RUNTIME_LOG_LINES = 200
@@ -13,6 +14,8 @@ export const BROKER_COMMANDS = Object.freeze({
   runtimeProvision: 'runtime_provision',
   runtimeStart: 'runtime_start',
   runtimeStop: 'runtime_stop',
+  runtimeVerify: 'runtime_verify',
+  runtimeRepair: 'runtime_repair',
   runtimeLogs: 'runtime_logs',
 } as const)
 
@@ -35,6 +38,14 @@ export async function startRuntime(): Promise<RuntimeOperationResult> {
 
 export async function stopRuntime(): Promise<RuntimeOperationResult> {
   return invoke<RuntimeOperationResult>(BROKER_COMMANDS.runtimeStop)
+}
+
+export async function verifyRuntime(): Promise<RuntimeVerifyResult> {
+  return invoke<RuntimeVerifyResult>(BROKER_COMMANDS.runtimeVerify)
+}
+
+export async function repairRuntime(): Promise<RuntimeOperationResult> {
+  return invoke<RuntimeOperationResult>(BROKER_COMMANDS.runtimeRepair)
 }
 
 export async function getRuntimeLogs(

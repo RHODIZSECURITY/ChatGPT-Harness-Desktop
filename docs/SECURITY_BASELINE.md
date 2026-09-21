@@ -8,10 +8,12 @@ Harness Desktop is a client of Harness Core contract v1. The renderer is not a c
 
 ## Renderer and IPC
 
-- Exactly five commands are registered: `runtime_status`, `runtime_provision`, `runtime_start`, `runtime_stop` and `runtime_logs`.
+- Exactly seven commands are registered: `runtime_status`, `runtime_provision`,
+  `runtime_start`, `runtime_stop`, `runtime_verify`, `runtime_repair` and
+  `runtime_logs`.
 - `tauri_build::AppManifest` generates the command ACL.
 - Main-window capability is local-only and Windows-only.
-- The capability grants only the five matching `allow-runtime-*` permissions.
+- The capability grants only the seven matching `allow-runtime-*` permissions.
 - `core:default` is intentionally not granted.
 - No shell, process or log plugin is installed.
 - The renderer cannot supply an executable or argv. The only renderer-supplied
@@ -42,6 +44,38 @@ reported as `timed_out`, never as success.
   a labelling phrase. stderr is captured but never reaches the renderer: it is
   used only to bound the payload, which keeps host paths and command errors out
   of the UI at the cost of some diagnostic detail.
+- `runtime_verify` — **read-only diagnosis**. One fixed probe,
+  `systemctl is-active rhodiz-harness-bootstrap.service`, classified by exit
+  code: `active`; `inactive` (distribution answered, unit is not running);
+  `distro_unreachable`; `wsl_missing`; or `unknown` (timeout). It deliberately
+  takes **no lifecycle lock**: holding one would answer `blocked` during a
+  start or a stop, exactly when a diagnosis is most needed. That is safe
+  because `systemctl is-active` mutates nothing. The price of being lock-free
+  is that the answer is an instantaneous snapshot: a probe issued while a
+  start, stop or repair is mid-flight can report the transient value it
+  happens to observe; callers needing a settled state re-verify after the
+  mutation returns. It deliberately probes
+  **only** WSL, distro reachability and the bootstrap unit — Docker, Core,
+  Route, Memory and Providers are reported as unprobed so the renderer cannot
+  mistake "not probed" for "verified healthy". No stdout is parsed; `wsl.exe`
+  emits UTF-16LE and classification is by exit code, the same pattern the rest
+  of the broker uses.
+- `runtime_repair` — **explicit, bounded mutation**, never automatic. Under the
+  lifecycle lock it runs exactly two fixed commands against the unit:
+  `systemctl reset-failed` (best-effort cleanup of a latched start-limit
+  failure, its outcome deliberately ignored) and `systemctl restart`, whose
+  outcome decides the result. When the distribution is unreachable, `restart`
+  fails the same way, so the resulting diagnosis stays correct. It never
+  provisions, installs or deletes anything. A **distro-level restart is
+  deliberately omitted**: that decision belongs to the operator because of its
+  blast radius and precedent, and the underlying failure is not yet
+  reproducible until provisioning and Core land; revisit once tasks 4.2/4.3
+  exist.
+  **Assumption, not measured evidence:** `systemctl is-active` exiting `3` is
+  treated as "distribution answered, unit inactive/failed/unknown", and any
+  *other* non-zero exit as "distribution unreachable". This mapping has not
+  been exercised against a real `wsl.exe`; confirming it belongs to Windows
+  certification, and the broker-core constant documents it as an assumption.
 - `runtime_provision` — **fails closed**. It performs no work and returns
   `blocked`, because signed runtime manifest verification does not exist yet.
   Provisioning by arbitrary URL is deliberately not implemented. It takes the
@@ -57,7 +91,8 @@ threadpool; a non-async command body would block the UI thread for up to
 Mutating operations hold two guards:
 
 1. A process-wide `Mutex`, which rejects a second concurrent call inside this
-   process.
+   process. `runtime_verify` holds neither guard, by design: it issues no
+   mutation.
 2. A lock file under `%LOCALAPPDATA%`, opened denying all sharing.
 
 The second guard exists because the first is not sufficient on its own: this
@@ -89,41 +124,64 @@ The five Windows warnings are upstream maintenance warnings, not known vulnerabi
 ## Local certification evidence
 
 - Oxlint: 0 warnings / 0 errors.
-- Vitest: 15/15 PASS.
+- Vitest: 17/17 PASS.
 - Executable TypeScript/React coverage: 100% statements, branches, functions and lines.
 - Production renderer build: PASS.
-- Rust broker-core: 9/9 PASS.
+- Rust broker-core: 17/17 PASS.
 - `cargo fmt --check`: PASS.
 - Clippy with `-D warnings`: PASS.
 - `npm run verify:portable`: PASS end to end.
 - npm audit, full and production sets: 0 vulnerabilities.
 - Test repeat: Vitest 5/5 rounds; Rust broker-core 5/5 rounds.
+- Windows-target cross-check: `cargo check --target x86_64-pc-windows-msvc` and
+  `cargo clippy --target x86_64-pc-windows-msvc -- -D warnings`: PASS with
+  0 errors and 0 warnings over the whole workspace.
 - `git diff --check` against the base branch: PASS.
 
 ### Coverage of the native broker on this checkpoint
 
 `verify:portable` does not compile `src-tauri/src/broker.rs`: `clippy:rust` is
-scoped to `broker-core`, and the Tauri app crate does not build on a plain Linux
-host. The full `cargo check --target x86_64-pc-windows-gnu` cross-check could not
-run in this environment either, because `tauri-winres` requires the mingw
-`x86_64-w64-mingw32-windres` binary, which is not installed.
+scoped to `broker-core`, and the Tauri app crate does not link GTK on a plain
+Linux host. `clippy:tauri` against the **host** target is red on Linux even at
+the base commit: every Windows-only code path is `#[cfg]`-ed out there, so
+`-D warnings` flags its imports and helpers as dead. That is a property of the
+gate as defined, not of this change, and it means `clippy:tauri` can only be
+certified on a Windows host — which the CI job recorded below now does.
 
-`verify:windows` now runs `clippy:tauri`, which compiles the whole workspace
-with `-D warnings`. Until this checkpoint the only gate touching `broker.rs` was
-a warning-tolerant `cargo check`, which is how a lifecycle lock that was never
-called, and a dead import, both passed CI.
+What this checkpoint does run, and passes with zero errors and zero warnings:
 
-Instead, the broker's Windows code path was type-checked for
-`x86_64-pc-windows-gnu` in an isolated crate that depends on the real
-`broker-core` and carries the module verbatim minus its `#[tauri::command]`
-attributes: PASS with zero warnings. That covers `std::os::windows::process::CommandExt`,
-`creation_flags`, `wait_timeout::ChildExt` and the lifecycle-lock wiring. The
-`#[tauri::command(async)]` attribute itself was confirmed against
-`tauri-macros 2.6.3`, which lists `async` as an accepted attribute and maps a
-non-async function body to the `sync_threadpool` execution context.
+- `cargo check --target x86_64-pc-windows-msvc` — the real Windows target,
+  including `broker.rs` and the Tauri ACL build script, which validates the
+  capability manifest against the actual permission set. This required
+  `llvm-rc` (from a user-space LLVM 20 installation) for the Windows resource
+  step; it compiles every `#[cfg(windows)]` path.
+- `cargo clippy --target x86_64-pc-windows-msvc -- -D warnings` over the whole
+  workspace. This caught one real finding on the lifecycle lock file
+  (`create` without explicit truncate behaviour, fixed by `.truncate(false)`)
+  that no warning-tolerant check had surfaced before.
+- `cargo clippy -p rhodiz-harness-broker-core --all-targets -- -D warnings` on
+  the host, covering all pure logic including the new verify classification.
 
-This is narrower than a native build and is **not** Windows certification. The
-Windows CI job remains the first place `broker.rs` is compiled in full.
+### Windows CI result on this commit
+
+The `Windows Tauri check` job ran `npm run verify:windows` on a native
+`windows-latest` runner for this exact commit (workflow run 35553702789, event
+`pull_request`) and **passed**. The script is a `&&` chain, so `verify:portable`,
+`check:tauri` and `clippy:tauri` all succeeded there; `clippy:tauri` with
+`-D warnings` reported zero errors and zero warnings over both
+`rhodiz-harness-desktop` and `rhodiz-harness-broker-core`. `broker.rs` is
+therefore compiled and lint-clean against a real MSVC toolchain, which the
+Linux cross-check above could only approximate.
+
+That green result is **not** runtime certification and must not be read as one.
+`cargo check` and `cargo clippy` do not link a binary and execute no code, and
+the CI runner has no WSL2 installation, no `RHODIZ-Harness` distribution and no
+bootstrap unit. What stays unverified is therefore unchanged by CI passing:
+real `systemctl is-active` exit codes through `wsl.exe` (the exit-3 mapping
+remains an assumption), `repair` against a genuinely failed unit, lock
+contention between two real processes, and native WebView2 behaviour. Those
+require an approved Windows test environment with WSL2, which a CI type-check
+is not.
 
 ## Evidence limitation
 

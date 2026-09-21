@@ -10,6 +10,8 @@
     "allow-runtime-provision",
     "allow-runtime-start",
     "allow-runtime-stop",
+    "allow-runtime-verify",
+    "allow-runtime-repair",
     "allow-runtime-logs"
   ]
 }

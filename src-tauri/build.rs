@@ -4,6 +4,8 @@ fn main() {
         "runtime_provision",
         "runtime_start",
         "runtime_stop",
+        "runtime_verify",
+        "runtime_repair",
         "runtime_logs",
     ]);
     let attributes = tauri_build::Attributes::new().app_manifest(manifest);

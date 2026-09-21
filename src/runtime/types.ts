@@ -15,7 +15,7 @@ export interface RuntimeStatus {
   providers: RuntimeComponent
 }
 
-export type RuntimeOperation = 'provision' | 'start' | 'stop' | 'logs'
+export type RuntimeOperation = 'provision' | 'start' | 'stop' | 'verify' | 'repair' | 'logs'
 export type OperationState =
   | 'succeeded'
   | 'failed'
@@ -34,4 +34,22 @@ export interface RuntimeLogsResult {
   lines: string[]
   truncated: boolean
   detail?: string
+}
+
+export type UnitState =
+  | 'active'
+  | 'inactive'
+  | 'distro_unreachable'
+  | 'wsl_missing'
+  | 'unknown'
+
+export interface RuntimeVerifyResult {
+  operation: 'verify'
+  unit: UnitState
+  /** False whenever the broker could not determine the unit state. */
+  healthy: boolean
+  detail: string
+  /** Components verification does not probe yet, so the renderer cannot
+   *  mistake "not probed" for "verified healthy". */
+  unprobed: string[]
 }
