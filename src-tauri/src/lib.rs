@@ -8,6 +8,8 @@ pub fn run() {
             broker::runtime_provision,
             broker::runtime_start,
             broker::runtime_stop,
+            broker::runtime_verify,
+            broker::runtime_repair,
             broker::runtime_logs,
         ])
         .run(tauri::generate_context!())

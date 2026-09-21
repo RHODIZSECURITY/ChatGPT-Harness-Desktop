@@ -20,6 +20,8 @@ test('Tauri shell is local-only with a non-null CSP and production devtools disa
     'allow-runtime-provision',
     'allow-runtime-start',
     'allow-runtime-stop',
+    'allow-runtime-verify',
+    'allow-runtime-repair',
     'allow-runtime-logs',
   ])
   expect(JSON.stringify(capability)).not.toContain('core:default')
@@ -38,6 +40,8 @@ test('native broker exposes no generic shell or process plugin', async () => {
     'broker::runtime_provision',
     'broker::runtime_start',
     'broker::runtime_stop',
+    'broker::runtime_verify',
+    'broker::runtime_repair',
     'broker::runtime_logs',
   ]) expect(lib).toContain(command)
   expect(lib).not.toContain('shell')
@@ -47,12 +51,16 @@ test('native broker exposes no generic shell or process plugin', async () => {
   expect(core).toContain('pub const MAX_LOG_LINES: u16 = 500')
   expect(core).toContain('signed runtime manifest verification is required')
   expect(broker).toContain('runtime_logs(lines: Option<u16>)')
-  expect(broker).not.toMatch(/runtime_(?:start|stop|provision)\([^)]*String/)
+  expect(broker).not.toMatch(
+    /runtime_(?:start|stop|provision|verify|repair)\([^)]*String/,
+  )
   for (const command of [
     '"runtime_status"',
     '"runtime_provision"',
     '"runtime_start"',
     '"runtime_stop"',
+    '"runtime_verify"',
+    '"runtime_repair"',
     '"runtime_logs"',
   ]) expect(build).toContain(command)
 })
@@ -74,9 +82,15 @@ test('lifecycle mutations are serialized and never flash a console window', asyn
   // Every mutating command goes through the lock, provision included: it does
   // no work today, but a call site that is already correct cannot be forgotten
   // the way a comment can.
-  for (const operation of ['Provision', 'Start', 'Stop']) {
+  for (const operation of ['Provision', 'Start', 'Stop', 'Repair']) {
     expect(broker).toContain(`with_lifecycle_lock(RuntimeOperation::${operation}`)
   }
+
+  // Repair is the only mutation that runs two spawns under one lock, and verify
+  // deliberately holds no lock at all: pinning both so a later edit cannot
+  // quietly swap them.
+  expect(broker).toContain('with_lifecycle_lock(RuntimeOperation::Repair, platform_repair)')
+  expect(broker).not.toContain('with_lifecycle_lock(RuntimeOperation::Verify')
 
   // An in-process Mutex cannot see a second copy of the application, and
   // nothing here prevents one. Denying all sharing on the lock file is what
@@ -92,6 +106,8 @@ test('lifecycle mutations are serialized and never flash a console window', asyn
     'runtime_provision',
     'runtime_start',
     'runtime_stop',
+    'runtime_verify',
+    'runtime_repair',
     'runtime_logs',
   ]) {
     expect(broker).toMatch(
@@ -108,6 +124,20 @@ test('a gate compiles the native broker with warnings denied', async () => {
   expect(pkg.scripts['clippy:tauri']).toContain('-D warnings')
   expect(pkg.scripts['clippy:tauri']).not.toContain('-p ')
   expect(pkg.scripts['verify:windows']).toContain('clippy:tauri')
+})
+
+test('verify is a read-only exit-code probe and repair is bounded to one unit', async () => {
+  const core = await read('src-tauri/broker-core/src/lib.rs')
+  const broker = await read('src-tauri/src/broker.rs')
+  // Classification is by exit code; stdout of wsl.exe is never parsed.
+  expect(core).toContain('pub const SYSTEMCTL_INACTIVE_EXIT_CODE: i32 = 3')
+  expect(core).toContain('pub fn classify_unit_probe(outcome: CommandOutcome)')
+  expect(core).toContain('pub const UNPROBED_COMPONENTS: [&str; 5]')
+  // Repair resets a latched failure and restarts the unit, nothing more.
+  expect(broker).toContain('WSL_REPAIR_RESET_ARGS')
+  expect(broker).toContain('WSL_REPAIR_RESTART_ARGS')
+  expect(core).toContain('"reset-failed"')
+  expect(core).toContain('"restart"')
 })
 
 test('log redaction matches credential prefixes only at token boundaries', async () => {

@@ -2,14 +2,21 @@ use rhodiz_harness_broker_core::{
     classify_wsl_status, lifecycle_busy, lifecycle_lock_unavailable, operation_result,
     provisioning_blocked, runtime_log_args, runtime_status as build_status, sanitize_log_text,
     CommandOutcome, OperationState, RuntimeLogsResult, RuntimeOperation, RuntimeOperationResult,
-    RuntimeStatus, COMMAND_TIMEOUT_SECS, MAX_CAPTURE_BYTES, WSL_EXE, WSL_START_ARGS,
-    WSL_STATUS_ARGS, WSL_STOP_ARGS,
+    RuntimeStatus, RuntimeVerifyResult, COMMAND_TIMEOUT_SECS, MAX_CAPTURE_BYTES, WSL_EXE,
+    WSL_START_ARGS, WSL_STATUS_ARGS, WSL_STOP_ARGS,
 };
 
 // Only the non-Windows fallbacks report "unsupported"; importing it
 // unconditionally leaves a dead import on the one platform that ships.
 #[cfg(not(target_os = "windows"))]
-use rhodiz_harness_broker_core::unsupported_operation;
+use rhodiz_harness_broker_core::{unsupported_operation, unsupported_verify};
+
+// Same for the verify and repair probes: they are issued only by the Windows
+// implementations of the platform functions below.
+#[cfg(target_os = "windows")]
+use rhodiz_harness_broker_core::{
+    verify_result, WSL_REPAIR_RESET_ARGS, WSL_REPAIR_RESTART_ARGS, WSL_VERIFY_ARGS,
+};
 
 #[cfg(target_os = "windows")]
 use rhodiz_harness_broker_core::{
@@ -184,6 +191,35 @@ fn platform_operation(operation: RuntimeOperation, _args: &[String]) -> RuntimeO
     unsupported_operation(operation)
 }
 
+#[cfg(target_os = "windows")]
+fn platform_verify() -> RuntimeVerifyResult {
+    verify_result(run_wsl(&fixed_args(WSL_VERIFY_ARGS)).outcome)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_verify() -> RuntimeVerifyResult {
+    unsupported_verify()
+}
+
+/// Repair performs exactly two spawns under one lock. `reset-failed` is
+/// best-effort cleanup for a latched start-limit failure, so its outcome is
+/// deliberately ignored: the result that decides the repair is `restart`. When
+/// the distribution is unreachable, `restart` fails the same way, so the
+/// diagnosis the failure produces stays correct.
+#[cfg(target_os = "windows")]
+fn platform_repair() -> RuntimeOperationResult {
+    let _ = run_wsl(&fixed_args(WSL_REPAIR_RESET_ARGS));
+    operation_result(
+        RuntimeOperation::Repair,
+        run_wsl(&fixed_args(WSL_REPAIR_RESTART_ARGS)).outcome,
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_repair() -> RuntimeOperationResult {
+    unsupported_operation(RuntimeOperation::Repair)
+}
+
 /// Cross-process half of the lifecycle guard.
 ///
 /// The in-process mutex cannot see a second copy of the application, and
@@ -272,6 +308,30 @@ pub fn runtime_stop() -> RuntimeOperationResult {
     with_lifecycle_lock(RuntimeOperation::Stop, || {
         platform_operation(RuntimeOperation::Stop, &fixed_stop_args())
     })
+}
+
+// Verification is read-only and deliberately takes no lock. Holding one would
+// answer `blocked` during a start or a stop, exactly when a diagnosis is most
+// needed. That is safe because the only probe it issues, `systemctl
+// is-active`, mutates nothing; the broker-core constants document that
+// property on the argument vector itself.
+//
+// The price of being lock-free is that the answer is an instantaneous
+// snapshot: a probe issued while a start, stop or repair is mid-flight can
+// report the transient value it happens to observe. That is preferable to
+// blocking the diagnosis, and callers that need a settled state re-verify
+// after the mutation returns.
+#[tauri::command(async)]
+pub fn runtime_verify() -> RuntimeVerifyResult {
+    platform_verify()
+}
+
+// Repair is an explicit user-invoked mutation: clear a latched failure and
+// restart the bootstrap unit, nothing else. It holds the lifecycle lock for
+// both spawns, like every other mutating operation.
+#[tauri::command(async)]
+pub fn runtime_repair() -> RuntimeOperationResult {
+    with_lifecycle_lock(RuntimeOperation::Repair, platform_repair)
 }
 
 #[cfg(target_os = "windows")]

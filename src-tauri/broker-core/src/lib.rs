@@ -24,6 +24,41 @@ pub const WSL_STOP_ARGS: [&str; 8] = [
     "stop",
     RUNTIME_BOOTSTRAP_UNIT,
 ];
+/// Read-only probe. `systemctl is-active` mutates nothing, so verification can
+/// run while a lifecycle mutation holds the lock.
+pub const WSL_VERIFY_ARGS: [&str; 8] = [
+    "--distribution",
+    MANAGED_DISTRO_NAME,
+    "--user",
+    "root",
+    "--exec",
+    "systemctl",
+    "is-active",
+    RUNTIME_BOOTSTRAP_UNIT,
+];
+/// Clears a latched failure so the restart below is not refused by a start-limit
+/// counter. Best-effort: see `WSL_REPAIR_RESTART_ARGS`.
+pub const WSL_REPAIR_RESET_ARGS: [&str; 8] = [
+    "--distribution",
+    MANAGED_DISTRO_NAME,
+    "--user",
+    "root",
+    "--exec",
+    "systemctl",
+    "reset-failed",
+    RUNTIME_BOOTSTRAP_UNIT,
+];
+/// The step whose outcome decides the repair result.
+pub const WSL_REPAIR_RESTART_ARGS: [&str; 8] = [
+    "--distribution",
+    MANAGED_DISTRO_NAME,
+    "--user",
+    "root",
+    "--exec",
+    "systemctl",
+    "restart",
+    RUNTIME_BOOTSTRAP_UNIT,
+];
 pub const WSL_LOG_ARGS_PREFIX: [&str; 11] = [
     "--distribution",
     MANAGED_DISTRO_NAME,
@@ -143,6 +178,8 @@ pub enum CommandOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeOperation {
     Provision,
+    Verify,
+    Repair,
     Start,
     Stop,
     Logs,
@@ -173,6 +210,100 @@ pub struct RuntimeLogsResult {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+/// `systemctl is-active` reports an inactive, failed or unknown unit with this
+/// exit code. Any *other* non-zero code did not come from `systemctl` at all: it
+/// came from `wsl.exe` failing to reach the distribution, which is a different
+/// fault with a different remedy.
+///
+/// **Assumption, not measured evidence.** This mapping has not been exercised
+/// against a real `wsl.exe`; confirming it belongs to Windows certification.
+pub const SYSTEMCTL_INACTIVE_EXIT_CODE: i32 = 3;
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UnitState {
+    /// The bootstrap unit is running.
+    Active,
+    /// The distribution answered, but the unit is not running.
+    Inactive,
+    /// `wsl.exe` ran but could not reach the managed distribution.
+    DistroUnreachable,
+    /// `wsl.exe` itself could not be launched.
+    WslMissing,
+    /// The probe exceeded its time budget, so the state is unknown.
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct RuntimeVerifyResult {
+    pub operation: RuntimeOperation,
+    pub unit: UnitState,
+    /// Whether every check the broker can perform today came back healthy. A
+    /// state the broker cannot determine is never healthy.
+    pub healthy: bool,
+    pub detail: String,
+    /// Components whose typed probes do not exist yet. Reported so the renderer
+    /// cannot mistake "not probed" for "verified healthy".
+    pub unprobed: Vec<&'static str>,
+}
+
+/// Components that verification deliberately does not inspect, because the code
+/// that would install them does not exist yet (plan tasks 4.3 and 4.4).
+pub const UNPROBED_COMPONENTS: [&str; 5] = ["docker", "core", "route", "memory", "providers"];
+
+pub fn classify_unit_probe(outcome: CommandOutcome) -> (UnitState, String) {
+    match outcome {
+        CommandOutcome::Success => (
+            UnitState::Active,
+            format!("{RUNTIME_BOOTSTRAP_UNIT} is active in {MANAGED_DISTRO_NAME}"),
+        ),
+        CommandOutcome::Exit(SYSTEMCTL_INACTIVE_EXIT_CODE) => (
+            UnitState::Inactive,
+            format!(
+                "{MANAGED_DISTRO_NAME} responded but {RUNTIME_BOOTSTRAP_UNIT} is not running; \
+                 repair or start the managed runtime"
+            ),
+        ),
+        CommandOutcome::Exit(code) => (
+            UnitState::DistroUnreachable,
+            format!(
+                "the {MANAGED_DISTRO_NAME} distribution could not be reached (exit code {code}); \
+                 provision the managed runtime"
+            ),
+        ),
+        CommandOutcome::SpawnFailed => (
+            UnitState::WslMissing,
+            "wsl.exe could not be launched; install or enable WSL2".to_string(),
+        ),
+        CommandOutcome::TimedOut => (
+            UnitState::Unknown,
+            "the managed runtime probe timed out; state is unknown".to_string(),
+        ),
+    }
+}
+
+pub fn verify_result(outcome: CommandOutcome) -> RuntimeVerifyResult {
+    let (unit, detail) = classify_unit_probe(outcome);
+    RuntimeVerifyResult {
+        operation: RuntimeOperation::Verify,
+        healthy: unit == UnitState::Active,
+        unit,
+        detail,
+        unprobed: UNPROBED_COMPONENTS.to_vec(),
+    }
+}
+
+/// Verification on a platform that has no managed runtime at all.
+pub fn unsupported_verify() -> RuntimeVerifyResult {
+    RuntimeVerifyResult {
+        operation: RuntimeOperation::Verify,
+        unit: UnitState::Unknown,
+        healthy: false,
+        detail: "managed runtime verification is available only on Windows".to_string(),
+        unprobed: UNPROBED_COMPONENTS.to_vec(),
+    }
 }
 
 pub fn classify_wsl_status(outcome: CommandOutcome) -> RuntimeComponent {
@@ -465,6 +596,111 @@ mod tests {
         assert_eq!(result.operation, RuntimeOperation::Provision);
         assert_eq!(result.state, OperationState::Blocked);
         assert!(result.detail.unwrap().contains("signed runtime manifest"));
+    }
+
+    #[test]
+    fn verify_and_repair_arg_vectors_are_fixed_and_shell_free() {
+        assert_eq!(
+            WSL_VERIFY_ARGS,
+            [
+                "--distribution",
+                "RHODIZ-Harness",
+                "--user",
+                "root",
+                "--exec",
+                "systemctl",
+                "is-active",
+                "rhodiz-harness-bootstrap.service"
+            ]
+        );
+        assert_eq!(WSL_REPAIR_RESET_ARGS[6], "reset-failed");
+        assert_eq!(WSL_REPAIR_RESTART_ARGS[6], "restart");
+
+        for args in [
+            WSL_VERIFY_ARGS,
+            WSL_REPAIR_RESET_ARGS,
+            WSL_REPAIR_RESTART_ARGS,
+        ] {
+            assert_eq!(args[1], MANAGED_DISTRO_NAME);
+            assert_eq!(args[7], RUNTIME_BOOTSTRAP_UNIT);
+            assert!(!args.iter().any(|arg| *arg == "sh" || *arg == "bash"));
+            assert!(!args.iter().any(|arg| arg.contains("powershell")));
+            assert!(!args.iter().any(|arg| arg.contains("cmd.exe")));
+        }
+    }
+
+    #[test]
+    fn repair_never_provisions_installs_or_deletes() {
+        // The bounded remedy is restarting a unit. Anything that could create or
+        // destroy a distribution must stay out of these vectors.
+        for args in [WSL_REPAIR_RESET_ARGS, WSL_REPAIR_RESTART_ARGS] {
+            for forbidden in [
+                "--install",
+                "--import",
+                "--unregister",
+                "--terminate",
+                "--shutdown",
+                "--set-default",
+            ] {
+                assert!(
+                    !args.contains(&forbidden),
+                    "repair must not carry {forbidden}: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unit_probe_separates_an_inactive_unit_from_an_unreachable_distro() {
+        // The two faults have different remedies, so they must not collapse into
+        // one state.
+        let (inactive, inactive_detail) =
+            classify_unit_probe(CommandOutcome::Exit(SYSTEMCTL_INACTIVE_EXIT_CODE));
+        assert_eq!(inactive, UnitState::Inactive);
+        assert!(inactive_detail.contains("not running"));
+
+        let (unreachable, unreachable_detail) = classify_unit_probe(CommandOutcome::Exit(1));
+        assert_eq!(unreachable, UnitState::DistroUnreachable);
+        assert!(unreachable_detail.contains("provision"));
+
+        assert_ne!(inactive, unreachable);
+    }
+
+    #[test]
+    fn verification_is_healthy_only_when_the_unit_is_active() {
+        assert!(verify_result(CommandOutcome::Success).healthy);
+
+        for outcome in [
+            CommandOutcome::Exit(SYSTEMCTL_INACTIVE_EXIT_CODE),
+            CommandOutcome::Exit(1),
+            CommandOutcome::SpawnFailed,
+            CommandOutcome::TimedOut,
+        ] {
+            let result = verify_result(outcome);
+            assert!(
+                !result.healthy,
+                "an undetermined or failing probe must never read healthy: {result:?}"
+            );
+            assert!(!result.detail.is_empty());
+        }
+
+        // A timeout is unknown state, never a pass.
+        assert_eq!(
+            verify_result(CommandOutcome::TimedOut).unit,
+            UnitState::Unknown
+        );
+        assert!(!unsupported_verify().healthy);
+    }
+
+    #[test]
+    fn verification_declares_what_it_did_not_probe() {
+        // Silence about Docker/Core/Route/Memory/Providers would read as a pass.
+        for result in [verify_result(CommandOutcome::Success), unsupported_verify()] {
+            assert_eq!(
+                result.unprobed,
+                vec!["docker", "core", "route", "memory", "providers"]
+            );
+        }
     }
 
     #[test]

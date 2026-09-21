@@ -11,8 +11,10 @@ import {
   getRuntimeStatus,
   normalizeRuntimeLogLines,
   provisionRuntime,
+  repairRuntime,
   startRuntime,
   stopRuntime,
+  verifyRuntime,
 } from './bridge'
 
 beforeEach(() => vi.clearAllMocks())
@@ -23,6 +25,8 @@ test('renderer exposes only the enumerated bounded runtime commands', () => {
     runtimeProvision: 'runtime_provision',
     runtimeStart: 'runtime_start',
     runtimeStop: 'runtime_stop',
+    runtimeVerify: 'runtime_verify',
+    runtimeRepair: 'runtime_repair',
     runtimeLogs: 'runtime_logs',
   })
 })
@@ -35,11 +39,15 @@ test('status and lifecycle mutations carry no renderer-controlled arguments', as
   await expect(provisionRuntime()).resolves.toBe(expected)
   await expect(startRuntime()).resolves.toBe(expected)
   await expect(stopRuntime()).resolves.toBe(expected)
+  await expect(verifyRuntime()).resolves.toBe(expected)
+  await expect(repairRuntime()).resolves.toBe(expected)
 
   expect(invoke).toHaveBeenNthCalledWith(1, 'runtime_status')
   expect(invoke).toHaveBeenNthCalledWith(2, 'runtime_provision')
   expect(invoke).toHaveBeenNthCalledWith(3, 'runtime_start')
   expect(invoke).toHaveBeenNthCalledWith(4, 'runtime_stop')
+  expect(invoke).toHaveBeenNthCalledWith(5, 'runtime_verify')
+  expect(invoke).toHaveBeenNthCalledWith(6, 'runtime_repair')
 })
 
 test('log requests clamp non-finite, fractional, low and high values', async () => {
