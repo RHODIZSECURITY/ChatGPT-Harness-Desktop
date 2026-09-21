@@ -402,6 +402,145 @@ pub fn provisioning_blocked() -> RuntimeOperationResult {
     }
 }
 
+/// Probe used to determine the installed WSL version.
+pub const WSL_VERSION_ARGS: [&str; 1] = ["--version"];
+
+/// Interim floor for the WSL2 feature set the broker relies on. The release
+/// manifest (task 4.4) is the final authority for the minimum; until it
+/// exists this constant is the explicit, reviewable stand-in and is written
+/// as an assumption pending Windows certification, not as a certified fact.
+pub const MINIMUM_WSL_VERSION: (u32, u32, u32) = (2, 0, 0);
+
+/// Decodes the UTF-16LE text `wsl.exe` emits on stdout. `wsl.exe` output is
+/// UTF-16LE on Windows, so decoding it as UTF-8 would produce mojibake; this
+/// is the deliberate, documented exception to the broker's exit-code-only
+/// classification, and the only content it ever inspects is a version
+/// number. Accepts an optional BOM, stops at the first NUL, and fails closed
+/// (returns `None`) on anything it cannot decode exactly.
+pub fn decode_utf16le(bytes: &[u8]) -> Option<String> {
+    let payload = if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+        &bytes[2..]
+    } else {
+        bytes
+    };
+    if payload.len() % 2 != 0 {
+        return None;
+    }
+    let units: Vec<u16> = payload
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .take_while(|unit| *unit != 0)
+        .collect();
+    let text = String::from_utf16(&units).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn parse_version_component(bytes: &[u8], start: usize) -> Option<(u32, usize)> {
+    let mut end = start;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end == start || end - start > 9 {
+        return None;
+    }
+    let digits = std::str::from_utf8(&bytes[start..end]).ok()?;
+    let value = digits.parse::<u32>().ok()?;
+    Some((value, end))
+}
+
+fn parse_dotted_component(bytes: &[u8], after: usize) -> Option<(u32, usize)> {
+    let (value, end) = parse_version_component(bytes, after)?;
+    if bytes.get(end) != Some(&b'.') {
+        return None;
+    }
+    Some((value, end + 1))
+}
+
+/// Extracts the first three dotted numeric components from WSL version text,
+/// matching `major.minor.patch` anywhere in it. The exact output format of
+/// `wsl.exe --version` is a documented assumption pending Windows
+/// certification: the probe is deliberately best-effort, and any failure to
+/// extract makes the caller fail closed rather than assume the minimum is
+/// met.
+pub fn extract_wsl_version(text: &str) -> Option<(u32, u32, u32)> {
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() {
+        if !bytes[start].is_ascii_digit() {
+            start += 1;
+            continue;
+        }
+        if let Some(version) = parse_triple(bytes, start) {
+            return Some(version);
+        }
+        // This run of digits is not the start of a version triple. Skip the
+        // whole run rather than retrying at each digit inside it: retrying
+        // would let a long number match a suffix of itself, and aborting the
+        // scan would make a leading number elsewhere in the line ("WSL 2 —
+        // version: 2.0.9.0") hide the real version.
+        while start < bytes.len() && bytes[start].is_ascii_digit() {
+            start += 1;
+        }
+    }
+    None
+}
+
+/// Parses `major.minor.patch` anchored exactly at `start`.
+fn parse_triple(bytes: &[u8], start: usize) -> Option<(u32, u32, u32)> {
+    let (major, after_major) = parse_dotted_component(bytes, start)?;
+    let (minor, after_minor) = parse_dotted_component(bytes, after_major)?;
+    let (patch, _) = parse_version_component(bytes, after_minor)?;
+    Some((major, minor, patch))
+}
+
+/// True when an extracted WSL version meets `MINIMUM_WSL_VERSION`.
+pub fn wsl_version_sufficient(version: (u32, u32, u32)) -> bool {
+    version >= MINIMUM_WSL_VERSION
+}
+
+/// Provisioning preflight over the two fixed probes (`wsl.exe --status` and
+/// `wsl.exe --version`). Every route is fail-closed: provisioning performs no
+/// mutation today, so the result is always `blocked`, and the detail states
+/// what the user can actually do next for each WSL route — absent, present
+/// but outdated, present and sufficient, or unprobeable. An undecodable
+/// version never passes silently: refusing to provision is preferred to
+/// assuming the minimum is met.
+pub fn provisioning_preflight(
+    status_outcome: CommandOutcome,
+    version: Option<(u32, u32, u32)>,
+) -> RuntimeOperationResult {
+    let detail = match (status_outcome, version) {
+        (CommandOutcome::SpawnFailed, _) => Some(
+            "WSL is not installed. Install WSL2 (for example with `wsl --install` from an elevated shell) and retry. Provisioning stopped before creating anything.".to_string(),
+        ),
+        (CommandOutcome::TimedOut, _) => Some(
+            "the WSL status probe timed out, so WSL is not reachable yet; provisioning stopped before creating anything".to_string(),
+        ),
+        (CommandOutcome::Exit(code), _) => Some(format!(
+            "the WSL status probe exited with code {code}; refusing to provision"
+        )),
+        (CommandOutcome::Success, None) => Some(
+            "the installed WSL version could not be determined; refusing to provision rather than assume it meets the minimum".to_string(),
+        ),
+        (CommandOutcome::Success, Some(found)) if !wsl_version_sufficient(found) => Some(format!(
+            "WSL version {}.{}.{} is below the minimum {}.{}.{}; update WSL (for example with `wsl --update`) and retry. Provisioning stopped before creating anything.",
+            found.0, found.1, found.2, MINIMUM_WSL_VERSION.0, MINIMUM_WSL_VERSION.1, MINIMUM_WSL_VERSION.2
+        )),
+        (CommandOutcome::Success, Some(_)) => Some(
+            "signed runtime manifest verification is required before provisioning".to_string(),
+        ),
+    };
+    RuntimeOperationResult {
+        operation: RuntimeOperation::Provision,
+        state: OperationState::Blocked,
+        detail,
+    }
+}
+
 pub fn normalize_log_lines(requested: Option<u16>) -> u16 {
     requested
         .unwrap_or(DEFAULT_LOG_LINES)
@@ -738,5 +877,114 @@ mod tests {
         assert_eq!(status.route.state, ComponentState::Unavailable);
         assert_eq!(status.memory.state, ComponentState::Unavailable);
         assert_eq!(status.providers.state, ComponentState::Unavailable);
+    }
+
+    /// Encodes ASCII as the UTF-16LE bytes `wsl.exe` actually emits.
+    fn utf16le(text: &str) -> Vec<u8> {
+        text.encode_utf16()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn utf16le_decode_handles_bom_nul_and_trim() {
+        let mut with_bom = vec![0xFF, 0xFE];
+        with_bom.extend(utf16le("  2.1.3 \r\n"));
+        assert_eq!(decode_utf16le(&with_bom), Some("2.1.3".to_string()));
+
+        let mut nul_terminated = utf16le("2.1.3");
+        nul_terminated.extend(utf16le("\u{0}trailing ignored"));
+        assert_eq!(decode_utf16le(&nul_terminated), Some("2.1.3".to_string()));
+
+        assert_eq!(
+            decode_utf16le(&utf16le("WSL version: 2.1.3")),
+            Some("WSL version: 2.1.3".to_string())
+        );
+    }
+
+    #[test]
+    fn utf16le_decode_fails_closed_on_malformed_input() {
+        // Odd byte count cannot be a UTF-16 stream.
+        assert_eq!(decode_utf16le(&[0x41, 0x00, 0x42]), None);
+        // Unpaired surrogate is not valid UTF-16.
+        assert_eq!(decode_utf16le(&[0x00, 0xD8]), None);
+        // BOM-only and whitespace-only output are not a version source.
+        assert_eq!(decode_utf16le(&[0xFF, 0xFE]), None);
+        assert_eq!(decode_utf16le(&utf16le("   ")), None);
+    }
+
+    #[test]
+    fn version_extraction_finds_the_first_dotted_triple() {
+        assert_eq!(
+            extract_wsl_version("WSL version: 2.1.3.0"),
+            Some((2, 1, 3))
+        );
+        assert_eq!(extract_wsl_version("12.34.56 extra"), Some((12, 34, 56)));
+        assert_eq!(extract_wsl_version("no version here"), None);
+        // A component wider than nine digits cannot be a version, so the
+        // extraction fails closed instead of overflowing or truncating.
+        assert_eq!(extract_wsl_version("123456789012.1.2"), None);
+        // A partial triple is not a version either.
+        assert_eq!(extract_wsl_version("2.1"), None);
+        // A bare number ahead of the triple must not hide it, and must not be
+        // rescanned digit by digit into a bogus match.
+        assert_eq!(
+            extract_wsl_version("WSL 2 - version: 2.0.9.0"),
+            Some((2, 0, 9))
+        );
+    }
+
+    #[test]
+    fn wsl_version_sufficient_compares_component_wise() {
+        assert!(wsl_version_sufficient(MINIMUM_WSL_VERSION));
+        assert!(wsl_version_sufficient((99, 0, 0)));
+        assert!(!wsl_version_sufficient((1, 9, 9)));
+    }
+
+    #[test]
+    fn preflight_reports_wsl_absent_with_actionable_detail() {
+        let result = provisioning_preflight(CommandOutcome::SpawnFailed, None);
+        assert_eq!(result.operation, RuntimeOperation::Provision);
+        assert_eq!(result.state, OperationState::Blocked);
+        assert!(result.detail.unwrap().contains("wsl --install"));
+    }
+
+    #[test]
+    fn preflight_reports_outdated_wsl_and_stops_before_creating_anything() {
+        let result = provisioning_preflight(CommandOutcome::Success, Some((1, 9, 9)));
+        assert_eq!(result.state, OperationState::Blocked);
+        let detail = result.detail.unwrap();
+        assert!(detail.contains("1.9.9"));
+        assert!(detail.contains("wsl --update"));
+        assert!(detail.contains("before creating anything"));
+    }
+
+    #[test]
+    fn preflight_refuses_to_provision_when_the_version_cannot_be_determined() {
+        let result = provisioning_preflight(CommandOutcome::Success, None);
+        assert_eq!(result.state, OperationState::Blocked);
+        assert!(result
+            .detail
+            .unwrap()
+            .contains("could not be determined"));
+    }
+
+    #[test]
+    fn preflight_keeps_the_signed_manifest_gate_for_sufficient_wsl() {
+        let result = provisioning_preflight(CommandOutcome::Success, Some((9, 9, 9)));
+        assert_eq!(result.state, OperationState::Blocked);
+        assert!(result
+            .detail
+            .unwrap()
+            .contains("signed runtime manifest verification"));
+    }
+
+    #[test]
+    fn preflight_treats_timeout_and_nonzero_status_as_not_probeable() {
+        let timed_out = provisioning_preflight(CommandOutcome::TimedOut, None);
+        assert_eq!(timed_out.state, OperationState::Blocked);
+        let exited = provisioning_preflight(CommandOutcome::Exit(7), None);
+        assert_eq!(exited.state, OperationState::Blocked);
+        assert!(exited.detail.unwrap().contains("7"));
     }
 }
