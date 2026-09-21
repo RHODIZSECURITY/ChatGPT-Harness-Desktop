@@ -14,8 +14,8 @@ serde = { version = "=1.0.229", features = ["derive"] }
 # Ed25519 is chosen because verification needs no ASN.1/DER decoding, which
 # would itself reintroduce a parse-before-verify step inside the verifier.
 ed25519-dalek = { version = "=3.0.0", default-features = false }
-
-[dev-dependencies]
-# Test-only: reads the Windows evidence captures in evidence/windows/. Pinned
-# to the version already resolved in the workspace lockfile.
+# Parsing the manifest AFTER its signature has been checked, and reading the
+# Windows evidence captures in tests. Was a dev-dependency until parsing
+# became a runtime path; promoting it added nothing to the lockfile, since
+# the tests had already resolved this exact version.
 serde_json = "=1.0.151"

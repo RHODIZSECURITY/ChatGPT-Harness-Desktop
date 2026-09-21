@@ -195,6 +195,24 @@ pub fn verify_release_manifest<'a>(
     verify_manifest_with_key(&public_key, manifest, signature)
 }
 
+/// Verification for the parser's tests, and nothing else.
+///
+/// `cfg(test)` so it does not exist in any build that ships. The parser in
+/// `release` must be reachable only from verified bytes, which means its
+/// tests need to *perform* a verification rather than fabricate a
+/// [`VerifiedManifestBytes`] — fabricating one would test serde and quietly
+/// skip the property the module exists to hold. This keeps the production
+/// surface exactly as the module doc describes it: outside this module, in a
+/// shipped build, [`verify_release_manifest`] remains the only way in.
+#[cfg(test)]
+pub(crate) fn verify_for_tests<'a>(
+    public_key: &[u8],
+    manifest: &'a [u8],
+    signature: &[u8],
+) -> Result<VerifiedManifestBytes<'a>, ManifestVerifyError> {
+    verify_manifest_with_key(public_key, manifest, signature)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

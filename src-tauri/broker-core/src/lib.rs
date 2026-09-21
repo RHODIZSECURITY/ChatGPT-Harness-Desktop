@@ -7,14 +7,22 @@ use serde::Serialize;
 /// to it is what stops a caller here from choosing its own trust anchor.
 mod manifest;
 
+/// Parsing of a manifest that has already been verified. Separate from
+/// `manifest` so the verifier stays readable on its own.
+mod release;
+
+pub use manifest::{
+    verify_release_manifest, ManifestVerifyError, VerifiedManifestBytes, MANIFEST_PUBLIC_KEY_LEN,
+    MANIFEST_SIGNATURE_LEN, MAX_MANIFEST_BYTES,
+};
 /// Re-exported deliberately narrowly. `verify_release_manifest` is the only
 /// entry point: it consults the anchor pinned at build time, and there is no
 /// way from outside the module to verify against any other key. The two
 /// length constants are public because the error documentation refers to
 /// them, not because a caller needs to build a key or a signature by hand.
-pub use manifest::{
-    verify_release_manifest, ManifestVerifyError, VerifiedManifestBytes, MANIFEST_PUBLIC_KEY_LEN,
-    MANIFEST_SIGNATURE_LEN, MAX_MANIFEST_BYTES,
+pub use release::{
+    parse_release_manifest, Compatibility, DesktopRelease, ImageRef, ManifestParseError,
+    ProviderRelease, ReleaseManifest, RuntimeRelease, SUPPORTED_SCHEMA_VERSION,
 };
 
 pub const MANAGED_DISTRO_NAME: &str = "RHODIZ-Harness";
