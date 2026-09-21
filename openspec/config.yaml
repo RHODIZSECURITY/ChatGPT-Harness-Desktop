@@ -1,0 +1,18 @@
+schema: spec-driven
+
+context: |
+  Language: es
+  All artifacts must be written in es.
+  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
+  Repository: RHODIZSECURITY/ChatGPT-Arnes (Cloud ChatGPT Arnes / RHODIZ Harness Core).
+  Product and runtime documentation under docs/ and prompts/ remains in English;
+  that is intentional and is not changed by this OpenSpec convention.
+
+  Authority rules for every agent working in this repository:
+  - The RemoteAccess product roadmap is NOT owned here. It lives in
+    RHODIZSECURITY/RHODIZ-MCP-Route under openspec/changes/remote-access/.
+    No change in this repository may duplicate, fork or contradict it.
+  - prompts/HARNESS_PROMPT.md is the canonical behavioural contract for ChatGPT
+    clients. No OpenSpec artifact may introduce a competing behavioural prompt.
+  - Already certified Core guarantees are baseline obligations. A change may add
+    to them; it may never silently weaken them.
