@@ -146,7 +146,7 @@ Linux host. `clippy:tauri` against the **host** target is red on Linux even at
 the base commit: every Windows-only code path is `#[cfg]`-ed out there, so
 `-D warnings` flags its imports and helpers as dead. That is a property of the
 gate as defined, not of this change, and it means `clippy:tauri` can only be
-certified on a Windows host.
+certified on a Windows host — which the CI job recorded below now does.
 
 What this checkpoint does run, and passes with zero errors and zero warnings:
 
@@ -162,10 +162,26 @@ What this checkpoint does run, and passes with zero errors and zero warnings:
 - `cargo clippy -p rhodiz-harness-broker-core --all-targets -- -D warnings` on
   the host, covering all pure logic including the new verify classification.
 
-This remains **not** Windows certification: `systemctl` exit-code semantics
-through a real `wsl.exe`, lock contention between two real processes, and
-native WebView2 behaviour stay unverified until the Windows CI job. That job
-remains the first place `broker.rs` is compiled and linked natively.
+### Windows CI result on this commit
+
+The `Windows Tauri check` job ran `npm run verify:windows` on a native
+`windows-latest` runner for this exact commit (workflow run 35553702789, event
+`pull_request`) and **passed**. The script is a `&&` chain, so `verify:portable`,
+`check:tauri` and `clippy:tauri` all succeeded there; `clippy:tauri` with
+`-D warnings` reported zero errors and zero warnings over both
+`rhodiz-harness-desktop` and `rhodiz-harness-broker-core`. `broker.rs` is
+therefore compiled and lint-clean against a real MSVC toolchain, which the
+Linux cross-check above could only approximate.
+
+That green result is **not** runtime certification and must not be read as one.
+`cargo check` and `cargo clippy` do not link a binary and execute no code, and
+the CI runner has no WSL2 installation, no `RHODIZ-Harness` distribution and no
+bootstrap unit. What stays unverified is therefore unchanged by CI passing:
+real `systemctl is-active` exit codes through `wsl.exe` (the exit-3 mapping
+remains an assumption), `repair` against a genuinely failed unit, lock
+contention between two real processes, and native WebView2 behaviour. Those
+require an approved Windows test environment with WSL2, which a CI type-check
+is not.
 
 ## Evidence limitation
 
