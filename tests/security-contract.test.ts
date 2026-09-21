@@ -257,7 +257,14 @@ test('every Provision outcome carries a detail string', async () => {
 // structural properties that make the enforcement real: a comment can be
 // deleted without any test noticing, but these cannot.
 test('manifest signature verification is enforced before any parse', async () => {
-  const manifest = await read('src-tauri/broker-core/src/manifest.rs')
+  const source = await read('src-tauri/broker-core/src/manifest.rs')
+
+  // Assert against production code only. `mod tests` names every constant and
+  // every error variant checked below, so reading the whole file would let a
+  // deleted guard keep passing on the strength of the test that covered it.
+  const testModule = source.indexOf('#[cfg(test)]')
+  expect(testModule).toBeGreaterThan(0)
+  const manifest = source.slice(0, testModule)
 
   // The handle that carries verified bytes has a private field and no
   // exported constructor, so a caller cannot fabricate one and parse first.
@@ -276,9 +283,13 @@ test('manifest signature verification is enforced before any parse', async () =>
   expect(manifest).toContain('if key.is_weak()')
 
   // The verifier hashes the whole input, so an unbounded read would let
-  // whoever serves the manifest choose how much work the broker does.
+  // whoever serves the manifest choose how much work the broker does. Pin the
+  // guard, not the variant name: a bare name would still be present if the
+  // `if` that enforces it were deleted.
   expect(manifest).toContain('pub const MAX_MANIFEST_BYTES: usize = 64 * 1024')
-  expect(manifest).toContain('ManifestVerifyError::ManifestTooLarge')
+  expect(manifest).toMatch(
+    /if manifest\.len\(\) > MAX_MANIFEST_BYTES \{\s*return Err\(ManifestVerifyError::ManifestTooLarge\);/,
+  )
 
   // No release signing key exists yet. `None` keeps the release path refusing
   // every input; a placeholder would look like a configured trust anchor
@@ -293,8 +304,20 @@ test('manifest signature verification is enforced before any parse', async () =>
   // signature never authenticated.
   expect(manifest).toMatch(/pub fn as_bytes\(&self\) -> &'a \[u8\] \{\s*self\.0\s*\}/)
 
-  // The module must be reachable from the broker, or none of the above binds
-  // anything.
+  // Choosing the key is choosing the trust anchor. The key-taking verifier
+  // stays private to the module so no caller can verify against an anchor of
+  // its own and still end up holding a VerifiedManifestBytes; the pinned
+  // constant is the only way in.
+  expect(manifest).toContain("fn verify_manifest_with_key<'a>(")
+  expect(manifest).not.toContain("pub fn verify_manifest_with_key<'a>(")
+
+  // The module is private and re-exported narrowly, so the crate root offers
+  // exactly one entry point. Re-exporting the key-taking verifier, or making
+  // the module public again, would put the anchor back in the caller's hands.
   const core = await read('src-tauri/broker-core/src/lib.rs')
-  expect(core).toContain('pub mod manifest;')
+  expect(core).toContain('mod manifest;')
+  expect(core).not.toContain('pub mod manifest;')
+  expect(core).toContain('pub use manifest::{')
+  expect(core).toContain('verify_release_manifest')
+  expect(core).not.toContain('verify_manifest_with_key')
 })

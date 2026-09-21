@@ -9,7 +9,10 @@ description = "RHODIZ Harness Desktop"
 authors = ["RHODIZ"]
 publish = false
 edition = "2021"
-rust-version = "1.77.2"
+# Tracks broker-core, which ed25519-dalek 3.0.0 holds at 1.85. This crate
+# depends on broker-core, so a lower figure here would be a minimum the
+# build cannot actually satisfy.
+rust-version = "1.85"
 
 [lib]
 name = "rhodiz_harness_desktop_lib"

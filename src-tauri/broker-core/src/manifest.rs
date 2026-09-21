@@ -4,12 +4,18 @@
 //! **SHALL** verify the signature over the *exact bytes* of the manifest
 //! before parsing any URL, version or digest, and parsing first is "un fallo
 //! de diseño, no una optimización". A comment saying so would rot, so the
-//! ordering is enforced by the type system instead: [`VerifiedManifestBytes`]
-//! has a private field, is constructed nowhere but inside
-//! [`verify_manifest_with_key`], and is the only handle that carries manifest
-//! bytes out of this module. A caller that wants to parse must first hold
-//! one, which it cannot fabricate — so "parse before verify" is a compile
-//! error rather than a review comment.
+//! ordering is carried by the types instead: [`VerifiedManifestBytes`] has a
+//! private field and is constructed nowhere but inside
+//! [`verify_manifest_with_key`], so a parser that takes one as its argument
+//! cannot be handed bytes nothing ever verified. The types do not stop a
+//! caller from parsing a `&[u8]` it already holds — no type can — but they do
+//! make "this parser only ever sees verified bytes" a property the compiler
+//! checks rather than a claim a reviewer has to take on trust.
+//!
+//! The key-taking verifier is private to this module for the same reason the
+//! anchor is a constant and not a parameter: [`verify_release_manifest`] is
+//! the only way in from outside the module, so no caller can supply its own
+//! public key and still end up holding a [`VerifiedManifestBytes`].
 //!
 //! Ed25519 is the chosen algorithm. It is deterministic, has no parameters to
 //! negotiate, and — decisively for this use — needs no ASN.1/DER decoding to
@@ -31,7 +37,10 @@ pub const MANIFEST_SIGNATURE_LEN: usize = 64;
 /// manifest describes a handful of artefacts and digests; anything near this
 /// size is not a manifest. The bound matters because verification hashes the
 /// whole input, so an unbounded read would let whoever serves the file choose
-/// how much work the broker does.
+/// how much work the broker does. The check here is the last line, not the
+/// first: whatever fetches the manifest must stop reading at this bound as
+/// well, because a refusal that arrives only after the bytes are already in
+/// memory has not bounded anything the fetch could have bounded first.
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 
 /// The pinned trust anchor for release manifests.
@@ -88,7 +97,7 @@ impl ManifestVerifyError {
                 "the release signing key is small-order and authenticates nothing; refusing to verify"
             }
             Self::MalformedSignature => {
-                "the release manifest signature is not a valid ed25519 signature; refusing to verify"
+                "the release manifest signature is not 64 bytes long; refusing to verify"
             }
             Self::SignatureMismatch => {
                 "the release manifest signature does not match its contents; refusing to verify"
@@ -125,7 +134,12 @@ impl<'a> VerifiedManifestBytes<'a> {
 /// [`VerifyingKey::is_weak`] check in front of it is defence in depth —
 /// `VerifyingKey::from_bytes` *accepts* the all-zero key, so key construction
 /// alone is not a filter.
-pub fn verify_manifest_with_key<'a>(
+///
+/// Private on purpose. A caller that could choose the key could verify a
+/// manifest against an anchor of its own and hold a [`VerifiedManifestBytes`]
+/// that the pinned release anchor never authenticated; the only way in from
+/// outside this module is [`verify_release_manifest`].
+fn verify_manifest_with_key<'a>(
     public_key: &[u8],
     manifest: &'a [u8],
     signature: &[u8],
@@ -173,6 +187,8 @@ pub fn verify_release_manifest<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use ed25519_dalek::Verifier;
 
     /// Decodes a hex literal in a test vector. Panics on malformed input,
     /// which is what a broken fixture deserves.
@@ -351,21 +367,122 @@ mod tests {
         );
     }
 
+    // A public key whose encoding decompresses to no point on the curve. y = 2
+    // has no matching x, so `VerifyingKey::from_bytes` fails. The all-zero key
+    // cannot reach this branch — from_bytes *accepts* that one, which is why
+    // the weak-key guard exists — so without this vector the from_bytes error
+    // arm is never executed and deleting it would pass every test.
+    const NOT_ON_CURVE_PUBLIC: &str =
+        "0200000000000000000000000000000000000000000000000000000000000000";
+
+    // A forgery that the cofactorless verification equation accepts. R is the
+    // identity point (order 1) and s = k*a mod L, so [s]B = R + [k]A holds and
+    // `verify` returns Ok — for a signature whose R commits to nothing and
+    // which anyone holding A can construct. `verify_strict` rejects it on R's
+    // order. The weak-key guard cannot cover for it: it inspects only A, and A
+    // here is an ordinary prime-order key.
+    //
+    // Derived with a from-scratch Ed25519 implementation that reproduces
+    // RFC 8032 section 7.1 TEST 2 byte for byte from its published seed, so
+    // the vector is anchored to the standard rather than to itself.
+    const SMALL_ORDER_R_PUBLIC: &str =
+        "02f9fe53b5e09587c0e3055ff517d3fe3acad73a9cda59c5cf34c8ca9b116a0e";
+    const SMALL_ORDER_R_SIGNATURE: &str = concat!(
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "c2f448d094a7f3964bef3bbf3897e4978400d833a9c2bfcbe69e459628cfe307",
+    );
+
     #[test]
-    fn every_refusal_carries_distinct_operator_text() {
+    fn a_public_key_that_is_not_a_curve_point_is_refused() {
+        let key = hex(NOT_ON_CURVE_PUBLIC);
+        let bytes: &[u8; MANIFEST_PUBLIC_KEY_LEN] = key.as_slice().try_into().expect("32 bytes");
+        assert!(VerifyingKey::from_bytes(bytes).is_err());
+        assert_eq!(
+            verify_manifest_with_key(&key, MANIFEST_BYTES, &hex(MANIFEST_SIGNATURE)),
+            Err(ManifestVerifyError::MalformedPublicKey),
+        );
+    }
+
+    #[test]
+    fn a_signature_whose_r_is_the_identity_point_is_refused() {
+        let key = hex(SMALL_ORDER_R_PUBLIC);
+        let key_bytes: &[u8; MANIFEST_PUBLIC_KEY_LEN] =
+            key.as_slice().try_into().expect("32 bytes");
+        let verifying_key = VerifyingKey::from_bytes(key_bytes).expect("a well-formed key");
+
+        // Neither existing guard is what rejects this, so neither can be
+        // credited for it: the key parses, and it is not small-order.
+        assert!(!verifying_key.is_weak());
+
+        let raw = hex(SMALL_ORDER_R_SIGNATURE);
+        let signature_bytes: &[u8; MANIFEST_SIGNATURE_LEN] =
+            raw.as_slice().try_into().expect("64 bytes");
+        let signature = Signature::from_bytes(signature_bytes);
+
+        // Cofactorless verification accepts the forgery. This assertion is the
+        // point of the test: it proves the vector is a real distinguisher, so
+        // that relaxing verify_strict to verify cannot pass unnoticed.
+        assert!(verifying_key.verify(MANIFEST_BYTES, &signature).is_ok());
+
+        // Strict verification refuses it, and so does the module.
+        assert!(verifying_key
+            .verify_strict(MANIFEST_BYTES, &signature)
+            .is_err());
+        assert_eq!(
+            verify_manifest_with_key(&key, MANIFEST_BYTES, &raw),
+            Err(ManifestVerifyError::SignatureMismatch),
+        );
+    }
+
+    #[test]
+    fn every_refusal_names_its_own_cause_and_no_other() {
+        // Distinctness alone would survive permuting the arms: seven messages
+        // would still be seven different messages. Each variant is bound to a
+        // phrase that describes *its* cause and appears in no other message,
+        // so a swapped arm fails here instead of misleading an operator.
         let errors = [
-            ManifestVerifyError::NoTrustAnchor,
-            ManifestVerifyError::EmptyManifest,
-            ManifestVerifyError::ManifestTooLarge,
-            ManifestVerifyError::MalformedPublicKey,
-            ManifestVerifyError::WeakPublicKey,
-            ManifestVerifyError::MalformedSignature,
-            ManifestVerifyError::SignatureMismatch,
+            (
+                ManifestVerifyError::NoTrustAnchor,
+                "no release signing key is pinned",
+            ),
+            (ManifestVerifyError::EmptyManifest, "was empty"),
+            (
+                ManifestVerifyError::ManifestTooLarge,
+                "exceeded the maximum verifiable size",
+            ),
+            (
+                ManifestVerifyError::MalformedPublicKey,
+                "is not a valid ed25519 key",
+            ),
+            (ManifestVerifyError::WeakPublicKey, "small-order"),
+            (
+                ManifestVerifyError::MalformedSignature,
+                "is not 64 bytes long",
+            ),
+            (
+                ManifestVerifyError::SignatureMismatch,
+                "does not match its contents",
+            ),
         ];
-        for (index, error) in errors.iter().enumerate() {
-            assert!(!error.message().is_empty());
-            for other in &errors[index + 1..] {
-                assert_ne!(error.message(), other.message());
+        for (index, (error, phrase)) in errors.iter().enumerate() {
+            let message = error.message();
+            assert!(
+                message.contains(phrase),
+                "{error:?} must say {phrase:?}, said {message:?}"
+            );
+            // Every refusal ends the same way, so an operator never has to
+            // work out whether a message describes a refusal or a warning.
+            assert!(message.ends_with("; refusing to verify"), "{message:?}");
+            for (other, other_phrase) in &errors[index + 1..] {
+                assert_ne!(message, other.message());
+                assert!(
+                    !message.contains(other_phrase),
+                    "{error:?} must not carry {other:?}'s phrase {other_phrase:?}"
+                );
+                assert!(
+                    !other.message().contains(phrase),
+                    "{other:?} must not carry {error:?}'s phrase {phrase:?}"
+                );
             }
         }
     }
