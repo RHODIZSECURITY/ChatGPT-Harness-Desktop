@@ -57,9 +57,9 @@ reported as `timed_out`, never as success.
   mutation returns. It deliberately probes
   **only** WSL, distro reachability and the bootstrap unit — Docker, Core,
   Route, Memory and Providers are reported as unprobed so the renderer cannot
-  mistake "not probed" for "verified healthy". No stdout is parsed; `wsl.exe`
-  emits UTF-16LE and classification is by exit code, the same pattern the rest
-  of the broker uses.
+  mistake "not probed" for "verified healthy". It parses no stdout; `wsl.exe`
+  emits UTF-16LE and classification is by exit code, the pattern every command
+  but the provisioning version probe below uses.
 - `runtime_repair` — **explicit, bounded mutation**, never automatic. Under the
   lifecycle lock it runs exactly two fixed commands against the unit:
   `systemctl reset-failed` (best-effort cleanup of a latched start-limit
@@ -76,11 +76,27 @@ reported as `timed_out`, never as success.
   *other* non-zero exit as "distribution unreachable". This mapping has not
   been exercised against a real `wsl.exe`; confirming it belongs to Windows
   certification, and the broker-core constant documents it as an assumption.
-- `runtime_provision` — **fails closed**. It performs no work and returns
-  `blocked`, because signed runtime manifest verification does not exist yet.
-  Provisioning by arbitrary URL is deliberately not implemented. It takes the
-  lifecycle lock anyway, so the call site is already correct for the day it does
-  mutate.
+- `runtime_provision` — **fails closed on every branch**. It still creates,
+  downloads and installs nothing, because signed runtime manifest verification
+  does not exist yet, and provisioning by arbitrary URL is deliberately not
+  implemented. What it now does is *diagnose* before refusing, under the
+  lifecycle lock, so the call site is already correct for the day it mutates.
+  It runs the fixed status probe and, **only if that probe proves `wsl.exe`
+  answers at all**, a second fixed `wsl.exe --version`. Gating the second spawn
+  behind the first keeps an absent or wedged WSL to one `COMMAND_TIMEOUT_SECS`
+  rather than two, and the preflight ignores the version on those branches
+  anyway. The four states are distinguished **in the `detail` string only** — every branch returns `OperationState::Blocked` because the signed manifest gate is the ultimate barrier. The states are: WSL absent, WSL unprobeable, WSL present but older than the pinned minimum, and WSL sufficient — where the only remaining obstacle is the manifest gate, so that branch defers to the same refusal message rather than restating it.
+
+  **The one place the broker parses stdout for anything but logs.**
+  `wsl.exe --version` writes UTF-16LE, so the version cannot be read from an
+  exit code. The exception is deliberately narrow and fails closed at every
+  step: a non-success capture is not decoded, a **truncated** capture is
+  discarded rather than parsed (the cut can land mid-version and yield a
+  plausible but wrong triple that would wrongly clear the minimum), a decode
+  that finds no dotted triple yields no version, and a version that cannot be
+  established is a **refusal to provision**, never an assumed-sufficient pass.
+  `tests/security-contract.test.ts` pins the argv, the truncation guard and the
+  refusal message against drift.
 
 Every command is declared `#[tauri::command(async)]` so it runs on Tauri's sync
 threadpool; a non-async command body would block the UI thread for up to
@@ -127,7 +143,7 @@ The five Windows warnings are upstream maintenance warnings, not known vulnerabi
 - Vitest: 17/17 PASS.
 - Executable TypeScript/React coverage: 100% statements, branches, functions and lines.
 - Production renderer build: PASS.
-- Rust broker-core: 17/17 PASS.
+- Rust broker-core: 26/26 PASS.
 - `cargo fmt --check`: PASS.
 - Clippy with `-D warnings`: PASS.
 - `npm run verify:portable`: PASS end to end.
@@ -178,13 +194,42 @@ That green result is **not** runtime certification and must not be read as one.
 the CI runner has no WSL2 installation, no `RHODIZ-Harness` distribution and no
 bootstrap unit. What stays unverified is therefore unchanged by CI passing:
 real `systemctl is-active` exit codes through `wsl.exe` (the exit-3 mapping
-remains an assumption), `repair` against a genuinely failed unit, lock
-contention between two real processes, and native WebView2 behaviour. Those
-require an approved Windows test environment with WSL2, which a CI type-check
-is not.
+remains an assumption), the **actual byte shape of `wsl.exe --version` output**
+(the UTF-16LE decoder and the version scan are exercised only against
+synthesised bytes, so a real banner that carries no dotted triple would surface
+here as a refusal to provision, not as a crash or a wrong pass), `repair`
+against a genuinely failed unit, lock contention between two real processes,
+and native WebView2 behaviour. Those require an approved Windows test
+environment with WSL2, which a CI type-check is not.
 
 ## Evidence limitation
 
 The relay can exercise the pure Rust broker and cross-check the Windows Tauri code path, but it is not a Windows host. Native WebView2 behavior, WSL2 installation/provisioning, MSI/NSIS packaging, reboot recovery, Windows firewall behavior and signed updater flows remain uncertified until executed on an approved Windows test environment.
 
 A Linux cross-check must never be reported as native Windows certification.
+
+## Merge gate to `main` — closed until all three conditions hold
+
+Nothing in this repository merges to `main` unless **all** of these are true,
+because the stack enters `main` in order and a green cross-check is not runtime
+certification:
+
+1. **Flujo inquebrantable**: `npm run verify:portable` green end to end on the
+   candidate SHA, plus `check:tauri` and `clippy:tauri` with warnings denied —
+   the gate that actually compiles `broker.rs`.
+   Current status: ✅ green (last full run: 2026-09-21, SHA `0559336`).
+2. **CI verde**: all checks green on the candidate SHA for every PR in the
+   stack. Current status: ✅ #1–#5 all green on their current heads.
+3. **E2E verde**: plan section 10 tasks (clean Windows 11 host, WSL
+   absent/present/outdated paths, reboot recovery, Docker failure, digests,
+   loopback under VPN, rollback, uninstall, installer + signing, full Windows
+   E2E) passed on an approved Windows test environment. **Sección 10 prohíbe
+   terminantemente evidencia Linux.** Current status: ❌ — no Windows host
+   exists in this environment; nothing in section 10 has run.
+
+Final acceptance additionally requires the plan (11.7): **autorización
+explícita del operador** before release.
+
+Enforcement: the operator's standing order is that a merge to `main` with the
+E2E condition unsatisfied is a violation. This section exists so the gate is a
+recorded matter of fact, not a remembered instruction.

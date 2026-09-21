@@ -47,6 +47,7 @@ test('native broker exposes no generic shell or process plugin', async () => {
   expect(lib).not.toContain('shell')
   expect(core).toContain('pub const WSL_EXE: &str = "wsl.exe"')
   expect(core).toContain('pub const WSL_STATUS_ARGS: [&str; 1] = ["--status"]')
+  expect(core).toContain('pub const WSL_VERSION_ARGS: [&str; 1] = ["--version"]')
   expect(core).toContain('RUNTIME_BOOTSTRAP_UNIT: &str = "rhodiz-harness-bootstrap.service"')
   expect(core).toContain('pub const MAX_LOG_LINES: u16 = 500')
   expect(core).toContain('signed runtime manifest verification is required')
@@ -214,4 +215,37 @@ test('GitHub CI is pinned and certifies portable plus Windows gates', async () =
   expect(workflow).toContain('npm run verify:portable')
   expect(workflow).toContain('npm run verify:windows')
   expect(workflow).not.toContain('|| true')
+})
+
+// The provisioning preflight is the only place in the broker that reads
+// wsl.exe stdout for anything but logs, because `wsl --version` writes
+// UTF-16LE. Pin that it stays a narrow, fail-closed exception: the decode
+// refuses a truncated capture, and the preflight never turns an unreadable
+// version into permission to provision.
+test('the WSL version probe is a bounded, fail-closed exception to exit-code classification', async () => {
+  const broker = await read('src-tauri/src/broker.rs')
+  const core = await read('src-tauri/broker-core/src/lib.rs')
+  expect(broker).toContain('fn read_wsl_version() -> Option<(u32, u32, u32)>')
+  expect(broker).toContain('|| capture.truncated')
+  expect(broker).toContain('provisioning_preflight(status, version)')
+  // Provisioning still refuses to create anything on every branch.
+  expect(core).toMatch(
+    /pub fn provisioning_preflight[\s\S]*?state: OperationState::Blocked/,
+  )
+  // An undeterminable version is a refusal, never an assumed-sufficient pass.
+  expect(core).toContain(
+    'the installed WSL version could not be determined; refusing to provision',
+  )
+})
+
+// Every Provision result must carry a non-empty detail explaining the block.
+// The renderer must not be forced to guess why provisioning is blocked.
+test('every Provision outcome carries a detail string', async () => {
+  const core = await read('src-tauri/broker-core/src/lib.rs')
+  // provisioning_preflight uses a match expression assigning to a `detail` binding,
+  // then constructs RuntimeOperationResult { detail, ... }. Count Some(...) arms
+  // inside the match (5 branches set detail: Some(...), 1 returns early).
+  const preflightFn = core.slice(core.indexOf('pub fn provisioning_preflight'))
+  const someCount = (preflightFn.match(/=> Some\(/g) || []).length
+  expect(someCount).toBeGreaterThanOrEqual(5)
 })
