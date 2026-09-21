@@ -1,9 +1,16 @@
 use rhodiz_harness_broker_core::{
     classify_wsl_status, lifecycle_busy, lifecycle_lock_unavailable, operation_result,
-    provisioning_blocked, runtime_log_args, runtime_status as build_status, sanitize_log_text,
-    CommandOutcome, OperationState, RuntimeLogsResult, RuntimeOperation, RuntimeOperationResult,
-    RuntimeStatus, RuntimeVerifyResult, COMMAND_TIMEOUT_SECS, MAX_CAPTURE_BYTES, WSL_EXE,
-    WSL_START_ARGS, WSL_STATUS_ARGS, WSL_STOP_ARGS,
+    runtime_log_args, runtime_status as build_status, sanitize_log_text, CommandOutcome,
+    OperationState, RuntimeLogsResult, RuntimeOperation, RuntimeOperationResult, RuntimeStatus,
+    RuntimeVerifyResult, COMMAND_TIMEOUT_SECS, MAX_CAPTURE_BYTES, WSL_EXE, WSL_START_ARGS,
+    WSL_STATUS_ARGS, WSL_STOP_ARGS,
+};
+
+// The provisioning preflight only runs where there is a `wsl.exe` to probe;
+// the fallback below never reaches it.
+#[cfg(target_os = "windows")]
+use rhodiz_harness_broker_core::{
+    decode_utf16le, extract_wsl_version, provisioning_preflight, WSL_VERSION_ARGS,
 };
 
 // Only the non-Windows fallbacks report "unsupported"; importing it
@@ -272,7 +279,34 @@ where
 
 #[cfg(target_os = "windows")]
 fn platform_provision() -> RuntimeOperationResult {
-    provisioning_blocked()
+    let status = run_wsl(&fixed_args(WSL_STATUS_ARGS)).outcome;
+
+    // The version probe only runs once the status probe proved WSL answers at
+    // all. Spawning `wsl.exe --version` against an absent or wedged WSL would
+    // just spend another COMMAND_TIMEOUT_SECS to learn what we already know,
+    // and the preflight ignores the version on those branches anyway.
+    let version = if matches!(status, CommandOutcome::Success) {
+        read_wsl_version()
+    } else {
+        None
+    };
+
+    provisioning_preflight(status, version)
+}
+
+/// Reads the installed WSL version, or `None` if it cannot be established.
+///
+/// `wsl.exe --version` writes UTF-16LE, so this is the one place in the broker
+/// that decodes stdout for anything but logs. A truncated capture is discarded
+/// rather than parsed: the cut can land mid-version and yield a plausible but
+/// wrong triple, and the caller treats `None` as "refuse to provision".
+#[cfg(target_os = "windows")]
+fn read_wsl_version() -> Option<(u32, u32, u32)> {
+    let capture = run_wsl(&fixed_args(WSL_VERSION_ARGS));
+    if !matches!(capture.outcome, CommandOutcome::Success) || capture.truncated {
+        return None;
+    }
+    extract_wsl_version(&decode_utf16le(&capture.stdout)?)
 }
 
 #[cfg(not(target_os = "windows"))]

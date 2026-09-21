@@ -530,9 +530,10 @@ pub fn provisioning_preflight(
             "WSL version {}.{}.{} is below the minimum {}.{}.{}; update WSL (for example with `wsl --update`) and retry. Provisioning stopped before creating anything.",
             found.0, found.1, found.2, MINIMUM_WSL_VERSION.0, MINIMUM_WSL_VERSION.1, MINIMUM_WSL_VERSION.2
         )),
-        (CommandOutcome::Success, Some(_)) => Some(
-            "signed runtime manifest verification is required before provisioning".to_string(),
-        ),
+        // WSL is present and new enough, so the only thing still standing
+        // between us and provisioning is the manifest gate. Defer to it rather
+        // than restating its message here.
+        (CommandOutcome::Success, Some(_)) => return provisioning_blocked(),
     };
     RuntimeOperationResult {
         operation: RuntimeOperation::Provision,
@@ -915,10 +916,7 @@ mod tests {
 
     #[test]
     fn version_extraction_finds_the_first_dotted_triple() {
-        assert_eq!(
-            extract_wsl_version("WSL version: 2.1.3.0"),
-            Some((2, 1, 3))
-        );
+        assert_eq!(extract_wsl_version("WSL version: 2.1.3.0"), Some((2, 1, 3)));
         assert_eq!(extract_wsl_version("12.34.56 extra"), Some((12, 34, 56)));
         assert_eq!(extract_wsl_version("no version here"), None);
         // A component wider than nine digits cannot be a version, so the
@@ -963,10 +961,7 @@ mod tests {
     fn preflight_refuses_to_provision_when_the_version_cannot_be_determined() {
         let result = provisioning_preflight(CommandOutcome::Success, None);
         assert_eq!(result.state, OperationState::Blocked);
-        assert!(result
-            .detail
-            .unwrap()
-            .contains("could not be determined"));
+        assert!(result.detail.unwrap().contains("could not be determined"));
     }
 
     #[test]
