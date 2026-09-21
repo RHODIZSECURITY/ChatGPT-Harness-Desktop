@@ -72,12 +72,25 @@ evidencia de host/Windows que aún no existe:
 | Tarea | Estado real medido | Qué falta |
 | --- | --- | --- |
 | 4.1 estado + aprovisionamiento WSL tipados, fail-closed | **Parcial** | `runtime_status` clasifica ready/stopped/missing/unavailable; `runtime_provision` existe pero **falla cerrado a propósito** (no aprovisiona todavía) |
-| 4.5 verify, repair, start, stop, logs tipados | **Parcial** | `start`/`stop`/`logs` hechos y acotados; **`verify` y `repair` pendientes** |
+| 4.5 verify, repair, start, stop, logs tipados | **Parcial** | los **cinco comandos existen y están acotados** (verify y repair cerrados en `feat/runtime-verify-repair-20260920`, commit `e1bf7e8`, PR #4); falta la certificación Windows: exit codes reales de `systemctl is-active` a través de `wsl.exe` (el supuesto del `3` queda escrito como supuesto), el comportamiento real de `repair` contra una unidad fallida, y la contención del lock entre procesos |
 | 4.2 distro `RHODIZ-Harness` con systemd | Pendiente | — |
 | 4.3 Docker + Compose dentro de la distro | Pendiente | — |
 | 4.4 bundle de runtime con digests fijados | Pendiente | — |
 | 4.6 recuperación ante reinicio / fallo de Docker | Pendiente | — |
 | 4.7 almacén de secretos | Pendiente | — |
+
+Actualización de la fila 4.5, medida en este repo el 2026-09-20: en la rama
+`feat/runtime-verify-repair-20260920` (commit `e1bf7e8`, PR #4 hacia
+`feat/windows-wsl-lifecycle-20260920`) ya existen **siete comandos IPC** —los
+cinco anteriores más `runtime_verify` y `runtime_repair`— con el diseño cerrado
+del plan: verify es solo lectura y **no toma el lock** (instantánea; puede
+observar estados transitorios durante una mutación), repair toma el lock para sus
+dos spawns (`reset-failed` best-effort, `restart` decide), y el reinicio a nivel
+de distro **se omite a propósito** (decisión del operador del mismo día). La
+superficie de siete comandos está fijada por los contratos anti-crecimiento
+(`bridge.test.ts`, `tests/security-contract.test.ts`). La casilla sigue **Parcial**
+porque su cierre exige lo que la sección 10 reserva al host Windows, no por
+código pendiente.
 
 El lock entre procesos está **type-chequeado, no ejercitado en Windows** (ver
 `docs/SECURITY_BASELINE.md`): dos procesos reales disputándoselo no se prueba hasta
