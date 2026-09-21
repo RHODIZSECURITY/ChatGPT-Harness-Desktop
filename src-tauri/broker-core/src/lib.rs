@@ -950,6 +950,22 @@ mod tests {
     }
 
     #[test]
+    fn version_extraction_survives_a_localized_windows() {
+        // `wsl.exe --version` translates its labels. A Spanish Windows 11 host
+        // prints "Versión de WSL:", so a parser keyed to the English label
+        // would read nothing and the caller would fail closed on a perfectly
+        // good install. The scan is label-free precisely so that a locale is
+        // not a supported-configuration question; this test is what keeps it
+        // that way. The authoritative bytes live in evidence/windows/ and are
+        // replayed by tests/wsl_evidence_replay.rs — this fixture is the same
+        // shape kept close to the function it constrains.
+        let localized = "Versión de WSL: 2.7.10.0\n\
+                         Versión de kernel: 6.18.33.2-2\n\
+                         Versión de WSLg: 1.0.68";
+        assert_eq!(extract_wsl_version(localized), Some((2, 7, 10)));
+    }
+
+    #[test]
     fn wsl_version_sufficient_compares_component_wise() {
         assert!(wsl_version_sufficient(MINIMUM_WSL_VERSION));
         assert!(wsl_version_sufficient((99, 0, 0)));
