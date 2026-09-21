@@ -123,10 +123,11 @@ signature never authenticated.
   use, verification needs **no ASN.1/DER decoding** — a DER-framed scheme would
   put a parser *inside* the verifier, reintroducing at the signature layer the
   exact hazard this module exists to eliminate.
-- **`verify_strict`, never `verify`.** The strict form rejects small-order
-  public keys and signatures carrying a torsion component, which is what removes
-  the malleability that would otherwise let two distinct signatures authenticate
-  the same manifest.
+- **`verify_strict`, never `verify`.** Both forms reject a non-canonical scalar
+  (`s >= L`), so scalar malleability is closed on either path. What the strict
+  form adds is the check on the order of `R` and `A`: the cofactorless equation
+  accepts a signature whose `R` is a small-order point and whose `s` the key
+  holder chose to match; the strict form refuses it.
 - **Explicit `is_weak()` rejection** in front of it, as defence in depth:
   `VerifyingKey::from_bytes` *accepts* the all-zero key, so key construction is
   not a filter on its own.
@@ -228,7 +229,7 @@ The five Windows warnings are upstream maintenance warnings, not known vulnerabi
 - Vitest: 20/20 PASS.
 - Executable TypeScript/React coverage: 100% statements, branches, functions and lines.
 - Production renderer build: PASS.
-- Rust broker-core: 39/39 PASS.
+- Rust broker-core: 42/42 PASS.
 - `cargo fmt --check`: PASS.
 - Clippy with `-D warnings`: PASS.
 - `npm run verify:portable`: PASS end to end.

@@ -68,7 +68,8 @@ pub enum ManifestVerifyError {
     EmptyManifest,
     /// The manifest exceeded [`MAX_MANIFEST_BYTES`].
     ManifestTooLarge,
-    /// The public key was not a well-formed Ed25519 encoding.
+    /// The public key was not exactly [`MANIFEST_PUBLIC_KEY_LEN`] bytes, or
+    /// was not a well-formed Ed25519 encoding.
     MalformedPublicKey,
     /// The public key is small-order or carries a torsion component.
     WeakPublicKey,
@@ -127,13 +128,19 @@ impl<'a> VerifiedManifestBytes<'a> {
 /// Verifies a detached Ed25519 signature over `manifest` under `public_key`.
 ///
 /// This is the whole of the cryptographic decision, and it fails closed at
-/// every step. `verify_strict` rather than `verify` is deliberate: the strict
-/// form rejects small-order public keys and signatures carrying a torsion
-/// component, which is what removes the malleability that would otherwise let
-/// two distinct signatures authenticate the same manifest. The explicit
-/// [`VerifyingKey::is_weak`] check in front of it is defence in depth —
+/// every step. `verify_strict` rather than `verify` is deliberate, though for
+/// a narrower reason than the name suggests. Both forms reject a
+/// non-canonical scalar, so re-encoding `s` as `s + L` — the malleability
+/// most often cited here — is closed on either path and is not what the
+/// strict form contributes. What it contributes is the check on the order of
+/// `R` and `A`: the cofactorless equation `[s]B = R + [k]A` accepts a
+/// signature whose `R` is a small-order point and whose `s` the key holder
+/// chose to match, and the strict form refuses it. The explicit
+/// [`VerifyingKey::is_weak`] check in front of it is defence in depth and
+/// cannot stand in for that — it inspects only `A`, so a prime-order key
+/// carrying a small-order `R` walks straight past it — while
 /// `VerifyingKey::from_bytes` *accepts* the all-zero key, so key construction
-/// alone is not a filter.
+/// alone is not a filter either.
 ///
 /// Private on purpose. A caller that could choose the key could verify a
 /// manifest against an anchor of its own and hold a [`VerifiedManifestBytes`]
@@ -337,6 +344,15 @@ mod tests {
     }
 
     #[test]
+    fn the_size_bound_is_pinned_by_value_and_not_by_spelling() {
+        // The contract suite can only match the literal text of the constant,
+        // and `64 * 1024 * 1024` contains `64 * 1024` as a substring — so
+        // without this assertion the bound could grow a thousandfold with
+        // every suite still green.
+        assert_eq!(MAX_MANIFEST_BYTES, 65_536);
+    }
+
+    #[test]
     fn an_oversize_manifest_is_refused_before_it_is_hashed() {
         let oversize = vec![b'{'; MAX_MANIFEST_BYTES + 1];
         assert_eq!(
@@ -357,14 +373,30 @@ mod tests {
     }
 
     #[test]
-    fn the_release_path_refuses_everything_while_no_key_is_pinned() {
-        // Not a placeholder assertion: until a release key exists, the only
-        // safe answer for the real entry point is "no".
-        assert!(MANIFEST_PUBLIC_KEY.is_none());
-        assert_eq!(
-            verify_release_manifest(MANIFEST_BYTES, &hex(MANIFEST_SIGNATURE)),
-            Err(ManifestVerifyError::NoTrustAnchor),
-        );
+    fn the_release_path_never_runs_under_an_unusable_anchor() {
+        // Written so that pinning a key does not retire the test. Asserting
+        // `is_none()` would stop checking anything the day an anchor lands —
+        // exactly the day the entry point starts making a real decision.
+        match MANIFEST_PUBLIC_KEY {
+            None => assert_eq!(
+                verify_release_manifest(MANIFEST_BYTES, &hex(MANIFEST_SIGNATURE)),
+                Err(ManifestVerifyError::NoTrustAnchor),
+            ),
+            Some(pinned) => {
+                // A placeholder anchor would refuse every manifest too, but at
+                // the weak-key guard, which looks like a signature problem
+                // rather than a build that shipped without a trust anchor.
+                let key = VerifyingKey::from_bytes(&pinned).expect("a well-formed pinned key");
+                assert!(
+                    !key.is_weak(),
+                    "the pinned release key authenticates nothing"
+                );
+                assert_ne!(
+                    verify_release_manifest(MANIFEST_BYTES, &hex(MANIFEST_SIGNATURE)),
+                    Err(ManifestVerifyError::NoTrustAnchor),
+                );
+            }
+        }
     }
 
     // A public key whose encoding decompresses to no point on the curve. y = 2
@@ -375,12 +407,17 @@ mod tests {
     const NOT_ON_CURVE_PUBLIC: &str =
         "0200000000000000000000000000000000000000000000000000000000000000";
 
-    // A forgery that the cofactorless verification equation accepts. R is the
+    // A signature the cofactorless verification equation accepts. R is the
     // identity point (order 1) and s = k*a mod L, so [s]B = R + [k]A holds and
-    // `verify` returns Ok — for a signature whose R commits to nothing and
-    // which anyone holding A can construct. `verify_strict` rejects it on R's
-    // order. The weak-key guard cannot cover for it: it inspects only A, and A
-    // here is an ordinary prime-order key.
+    // `verify` returns Ok for a signature whose R commits to nothing.
+    // Constructing it needs the secret scalar a, so what it breaks is strong
+    // unforgeability — a second signature over the same manifest under the
+    // same key, minted by whoever holds that key — not existential
+    // unforgeability against a third party. That still matters for an update
+    // path, where "this key signed exactly these bytes once" is the property
+    // being relied on. `verify_strict` rejects it on R's order. The weak-key
+    // guard cannot cover for it: it inspects only A, and A here is an
+    // ordinary prime-order key.
     //
     // Derived with a from-scratch Ed25519 implementation that reproduces
     // RFC 8032 section 7.1 TEST 2 byte for byte from its published seed, so
@@ -440,30 +477,31 @@ mod tests {
         // would still be seven different messages. Each variant is bound to a
         // phrase that describes *its* cause and appears in no other message,
         // so a swapped arm fails here instead of misleading an operator.
-        let errors = [
-            (
-                ManifestVerifyError::NoTrustAnchor,
-                "no release signing key is pinned",
-            ),
-            (ManifestVerifyError::EmptyManifest, "was empty"),
-            (
-                ManifestVerifyError::ManifestTooLarge,
-                "exceeded the maximum verifiable size",
-            ),
-            (
-                ManifestVerifyError::MalformedPublicKey,
-                "is not a valid ed25519 key",
-            ),
-            (ManifestVerifyError::WeakPublicKey, "small-order"),
-            (
-                ManifestVerifyError::MalformedSignature,
-                "is not 64 bytes long",
-            ),
-            (
-                ManifestVerifyError::SignatureMismatch,
-                "does not match its contents",
-            ),
-        ];
+        // Built through an exhaustive match so that adding a variant without
+        // a phrase is a compile error in this test, not a silent omission.
+        fn phrase(v: ManifestVerifyError) -> &'static str {
+            match v {
+                ManifestVerifyError::NoTrustAnchor => "no release signing key is pinned",
+                ManifestVerifyError::EmptyManifest => "was empty",
+                ManifestVerifyError::ManifestTooLarge => "exceeded the maximum verifiable size",
+                ManifestVerifyError::MalformedPublicKey => "is not a valid ed25519 key",
+                ManifestVerifyError::WeakPublicKey => "small-order",
+                ManifestVerifyError::MalformedSignature => "is not 64 bytes long",
+                ManifestVerifyError::SignatureMismatch => "does not match its contents",
+            }
+        }
+        let errors: Vec<_> = [
+            ManifestVerifyError::NoTrustAnchor,
+            ManifestVerifyError::EmptyManifest,
+            ManifestVerifyError::ManifestTooLarge,
+            ManifestVerifyError::MalformedPublicKey,
+            ManifestVerifyError::WeakPublicKey,
+            ManifestVerifyError::MalformedSignature,
+            ManifestVerifyError::SignatureMismatch,
+        ]
+        .into_iter()
+        .map(|v| (v, phrase(v)))
+        .collect();
         for (index, (error, phrase)) in errors.iter().enumerate() {
             let message = error.message();
             assert!(

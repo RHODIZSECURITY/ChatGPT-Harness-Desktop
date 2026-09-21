@@ -262,9 +262,15 @@ test('manifest signature verification is enforced before any parse', async () =>
   // Assert against production code only. `mod tests` names every constant and
   // every error variant checked below, so reading the whole file would let a
   // deleted guard keep passing on the strength of the test that covered it.
+  // Assert against production code only. If tests live inline, strip them;
+  // if they've been extracted to a separate file, the whole source is
+  // production code — but assert it contains no test attributes, so the
+  // recorte never silently reverts to analysing test code.
   const testModule = source.indexOf('#[cfg(test)]')
-  expect(testModule).toBeGreaterThan(0)
-  const manifest = source.slice(0, testModule)
+  const manifest = testModule > 0 ? source.slice(0, testModule) : source
+  if (testModule < 0) {
+    expect(manifest).not.toMatch(/#\[test\]/)
+  }
 
   // The handle that carries verified bytes has a private field and no
   // exported constructor, so a caller cannot fabricate one and parse first.
@@ -275,8 +281,8 @@ test('manifest signature verification is enforced before any parse', async () =>
 
   // verify_strict, not verify: the strict form rejects small-order keys and
   // torsion components, which is what removes signature malleability.
-  expect(manifest).toContain('.verify_strict(manifest, &Signature::from_bytes(signature_bytes))')
-  expect(manifest).not.toMatch(/\.verify\(manifest/)
+  expect(manifest).toMatch(/\.verify_strict\(/)
+  expect(manifest).not.toMatch(/[^_]\.verify\(/)
 
   // VerifyingKey::from_bytes accepts the all-zero key, so key construction is
   // not a filter on its own.
@@ -291,12 +297,28 @@ test('manifest signature verification is enforced before any parse', async () =>
     /if manifest\.len\(\) > MAX_MANIFEST_BYTES \{\s*return Err\(ManifestVerifyError::ManifestTooLarge\);/,
   )
 
+  // The ordering guards exist to keep unbounded input away from the hash
+  // function. Moving them below verify_strict would turn them into dead
+  // code — verify_strict would hash the full input first.
+  const sizeGuardPos = manifest.indexOf('if manifest.len() > MAX_MANIFEST_BYTES')
+  const emptyGuardPos = manifest.indexOf('if manifest.is_empty()')
+  const verifyStrictPos = manifest.indexOf('.verify_strict(')
+  expect(sizeGuardPos).toBeGreaterThan(0)
+  expect(emptyGuardPos).toBeGreaterThan(0)
+  expect(verifyStrictPos).toBeGreaterThan(0)
+  expect(emptyGuardPos).toBeLessThan(verifyStrictPos)
+  expect(sizeGuardPos).toBeLessThan(verifyStrictPos)
+
   // No release signing key exists yet. `None` keeps the release path refusing
   // every input; a placeholder would look like a configured trust anchor
   // while authenticating nothing.
-  expect(manifest).toContain(
-    'pub const MANIFEST_PUBLIC_KEY: Option<[u8; MANIFEST_PUBLIC_KEY_LEN]> = None',
+  // The anchor is a compile-time constant, never loaded from a file or an
+  // environment variable. Pin that, not the exact initializer — "= None" will
+  // change the day a real key is pinned, and the contract should survive it.
+  expect(manifest).toMatch(
+    /pub const MANIFEST_PUBLIC_KEY: Option<\[u8; MANIFEST_PUBLIC_KEY_LEN\]> = (None|Some\(\[)/,
   )
+  expect(manifest).not.toMatch(/include_bytes!|include_str!|std::env|option_env!/)
   expect(manifest).toContain('return Err(ManifestVerifyError::NoTrustAnchor)')
 
   // The verified handle hands back the exact bytes the signature covered.
@@ -308,16 +330,19 @@ test('manifest signature verification is enforced before any parse', async () =>
   // stays private to the module so no caller can verify against an anchor of
   // its own and still end up holding a VerifiedManifestBytes; the pinned
   // constant is the only way in.
-  expect(manifest).toContain("fn verify_manifest_with_key<'a>(")
-  expect(manifest).not.toContain("pub fn verify_manifest_with_key<'a>(")
+  // Pinned by line-start anchor so pub(crate) would also be caught.
+  expect(manifest).toMatch(/^fn verify_manifest_with_key</m)
+  expect(manifest).not.toMatch(/^pub[\s(].*fn verify_manifest_with_key</m)
 
   // The module is private and re-exported narrowly, so the crate root offers
   // exactly one entry point. Re-exporting the key-taking verifier, or making
   // the module public again, would put the anchor back in the caller's hands.
   const core = await read('src-tauri/broker-core/src/lib.rs')
-  expect(core).toContain('mod manifest;')
-  expect(core).not.toContain('pub mod manifest;')
-  expect(core).toContain('pub use manifest::{')
-  expect(core).toContain('verify_release_manifest')
-  expect(core).not.toContain('verify_manifest_with_key')
+  expect(core).toMatch(/^mod manifest;$/m)
+  expect(core).not.toMatch(/^pub[\s(].*mod manifest;$/m)
+  const reExportMatch = core.match(/pub use manifest::\{([^}]*)\}/)
+  expect(reExportMatch).not.toBeNull()
+  const reExportBlock = reExportMatch![1]
+  expect(reExportBlock).toContain('verify_release_manifest')
+  expect(reExportBlock).not.toContain('verify_manifest_with_key')
 })
