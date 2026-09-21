@@ -151,6 +151,10 @@ fn verify_manifest_with_key<'a>(
     manifest: &'a [u8],
     signature: &[u8],
 ) -> Result<VerifiedManifestBytes<'a>, ManifestVerifyError> {
+    // The length of the manifest is public. Refusing an empty or oversize
+    // manifest early is distinguishable by time from a cryptographic refusal,
+    // which is deliberate: there is no requirement to obscure the size of the
+    // payload, and hashing an oversize input before refusing it would be a DoS.
     if manifest.is_empty() {
         return Err(ManifestVerifyError::EmptyManifest);
     }

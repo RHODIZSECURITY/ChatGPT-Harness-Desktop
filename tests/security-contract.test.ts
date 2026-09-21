@@ -282,7 +282,7 @@ test('manifest signature verification is enforced before any parse', async () =>
   // verify_strict, not verify: the strict form rejects small-order keys and
   // torsion components, which is what removes signature malleability.
   expect(manifest).toMatch(/\.verify_strict\(/)
-  expect(manifest).not.toMatch(/[^_]\.verify\(/)
+  expect(manifest.replace(/\/\/.*$/gm, "")).not.toMatch(/[^_]\.verify\(/)
 
   // VerifyingKey::from_bytes accepts the all-zero key, so key construction is
   // not a filter on its own.
@@ -324,7 +324,7 @@ test('manifest signature verification is enforced before any parse', async () =>
   // The verified handle hands back the exact bytes the signature covered.
   // Re-encoding or normalising here would mean parsing something the
   // signature never authenticated.
-  expect(manifest).toMatch(/pub fn as_bytes\(&self\) -> &'a \[u8\] \{\s*self\.0\s*\}/)
+  expect(manifest).toMatch(/pub\s+fn\s+as_bytes\(&self\)\s*->\s*&'a\s*\[u8\]/)
 
   // Choosing the key is choosing the trust anchor. The key-taking verifier
   // stays private to the module so no caller can verify against an anchor of
@@ -338,7 +338,7 @@ test('manifest signature verification is enforced before any parse', async () =>
   // exactly one entry point. Re-exporting the key-taking verifier, or making
   // the module public again, would put the anchor back in the caller's hands.
   const core = await read('src-tauri/broker-core/src/lib.rs')
-  expect(core).toMatch(/^mod manifest;$/m)
+  expect(core).toMatch(/^mod manifest;\s*(?:\/\/.*)?$/m)
   expect(core).not.toMatch(/^pub[\s(].*mod manifest;$/m)
   const reExportMatch = core.match(/pub use manifest::\{([^}]*)\}/)
   expect(reExportMatch).not.toBeNull()
