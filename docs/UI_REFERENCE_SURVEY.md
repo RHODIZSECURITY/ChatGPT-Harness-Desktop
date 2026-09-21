@@ -65,11 +65,42 @@ propio `Cargo.toml`, y usa **las mismas versiones que este repositorio**
 una generación distinta de Tauri, que es el riesgo que haría inservible el
 código de ventana y build.
 
-## librechat — todavía sin reconocer
+## librechat — la separación más limpia de las tres, pero no donde se esperaba
 
-No se ha leído. La clasificación `ADAPT` sigue siendo una decisión registrada
-y no comprobada, igual que lo eran las otras dos antes de este documento. No
-se debe citar como verificada.
+v0.8.8-rc3, 92 MB, workspaces `api`, `client`, `packages/*`. `ProjectMemory.md`
+lo declara fuente de UX de chat/MCP/artefactos y **no** proveedor/API
+alternativo. El modelo de proveedor que hay que dejar fuera son sus
+*endpoints* (`components/Endpoints`, 29 ficheros).
+
+Medido contra ese límite:
+
+| superficie | ficheros | tocan el modelo de proveedor |
+| --- | --- | --- |
+| `components/Artifacts` | 17 | **0** |
+| `components/MCP` | 13 | **0** |
+| `components/MCPUIResource` | 10 | **0** |
+| `components/Chat` | 438 | 100 (23%) |
+
+Las tres primeras son un corte limpio: la palabra `endpoint` no aparece **en
+ninguna forma** dentro de esos 40 ficheros. Se comprobó en positivo —
+enumerando qué importan de verdad— y no sólo con un patrón de ausencia,
+porque un patrón que codifica una sola representación de un hecho informa de
+que el hecho falta siempre que esté escrito de otra manera.
+
+`Chat` es lo contrario: 438 ficheros con casi una cuarta parte tocando
+endpoints. No es un corte limpio y no debe tratarse como tal.
+
+### Conclusión
+
+La clasificación se sostiene, pero conviene afinarla: de las tres partes que
+`ProjectMemory.md` nombra —chat, MCP, artefactos— **las de MCP y artefactos
+son separables y la de chat no**. Tomar `Artifacts`, `MCP` y `MCPUIResource`
+no arrastra el modelo de proveedor; tomar `Chat` sí lo haría.
+
+Coste a tener presente: `Artifacts` depende de `@codesandbox/sandpack-react`
+y `monaco-editor`, que no son ligeros en una aplicación de escritorio, y de
+`recoil` para su estado. Eso es peso de bundle y una librería de estado
+propia, no un obstáculo de licencia o de arquitectura.
 
 ## Qué NO establece esto
 
