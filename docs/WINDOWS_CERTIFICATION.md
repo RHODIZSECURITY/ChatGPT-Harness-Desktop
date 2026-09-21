@@ -84,6 +84,43 @@ vez de devolvernos en silencio a "sin evidencia, sin opinión".
    siempre la primera es lo único que sigue siendo suposición: se cumplió en
    este host y ningún contrato documentado lo garantiza.
 
+## Ejecutar la verificación completa en el host Windows
+
+```powershell
+npm ci
+npm run verify:windows
+```
+
+### Prerrequisito que CI nunca reproduce
+
+`winget install Rustlang.Rustup` deja `stable`, pero el repositorio fija
+1.98.1. Al entrar al checkout, rustup instala esa toolchain automáticamente
+**sin `rustfmt` ni `clippy`**, y `verify:windows` muere en su primer paso de
+Rust:
+
+```
+error: 'cargo-fmt.exe' is not installed for the toolchain '1.98.1-x86_64-pc-windows-msvc'
+```
+
+```powershell
+rustup component add --toolchain 1.98.1-x86_64-pc-windows-msvc rustfmt clippy
+```
+
+Los runners de CI no lo reproducen nunca: `.github/workflows/ci.yml` instala la
+toolchain con `--component rustfmt --component clippy` explícitos. Es decir, un
+CI verde no dice nada sobre si una máquina limpia puede ejecutar el gate.
+
+### Qué NO cubre `verify:windows`
+
+`verify:windows` es `verify:portable` + `cargo check --tests` + `clippy`. **No
+ejecuta `tauri build`**: no produce binario enlazado de la aplicación ni
+instalador. Un `verify:windows` verde no toca la tarea 10.9 (instalador, firma
+de código, E2E completo de Windows).
+
+Ejecutado sobre 4e8cbc2 en Windows 11 Home 26200 en español, con
+`RHODIZ_REQUIRE_WSL_EVIDENCE=1`: EXIT=0, 45 tests de Rust en verde (incluidos
+los 2 de replay), clippy limpio con `-D warnings`.
+
 ## Qué certifica y qué no
 
 Certifica la codificación y el barrido de versión sobre bytes reales. **No**
