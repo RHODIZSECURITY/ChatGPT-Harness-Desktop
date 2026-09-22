@@ -69,7 +69,11 @@ function Shell() {
         <RootLayout.Footer>
           <div
             aria-label="Runtime status"
-            className="flex h-full flex-wrap items-center gap-x-5 gap-y-1.5 px-5 text-[11px]"
+            // No `h-full`: Opal's footer is `shrink-0` with automatic height,
+            // so a full-height child inside it cannot grow when the row wraps —
+            // the second line renders past the bottom of a window that
+            // RootLayout has locked to the viewport, and is simply clipped.
+            className="flex flex-wrap items-center gap-x-5 gap-y-1.5 border-t border-border-01 px-5 py-2 text-[11px]"
           >
             <span className={error ? 'text-status-text-error-05' : 'text-text-03'}>
               {error ?? (status ? 'Broker: ' + status.platform : 'Checking broker…')}
