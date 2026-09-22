@@ -11,6 +11,11 @@ use rhodiz_harness_broker_core::{
 #[cfg(target_os = "windows")]
 use rhodiz_harness_broker_core::{
     decode_utf16le, extract_wsl_version, provisioning_preflight, WSL_VERSION_ARGS,
+    verify_release_manifest, parse_release_manifest, resolve_runtime_bundle,
+    decide_update, advanced_rollback_floor, wsl_import_args, ImportArgsError,
+    WSL_TERMINATE_ARGS, WSL_WRITE_CONF_ARGS, WSL_CONF_CONTENTS, MANAGED_DISTRO_NAME,
+    InstalledRelease, UpdateDecision, UpdateRefusal, BundleError, ManifestParseError,
+    RuntimeBundle, ReleaseManifest,
 };
 
 // Only the non-Windows fallbacks report "unsupported"; importing it
@@ -35,8 +40,8 @@ use std::sync::{Mutex, TryLockError};
 #[cfg(target_os = "windows")]
 use std::{
     env,
-    fs::{self, OpenOptions},
-    io::Read,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
     os::windows::{fs::OpenOptionsExt, process::CommandExt},
     path::PathBuf,
     process::{Command, Stdio},
@@ -279,19 +284,386 @@ where
 
 #[cfg(target_os = "windows")]
 fn platform_provision() -> RuntimeOperationResult {
+    // Step 1: WSL preflight (same as before)
     let status = run_wsl(&fixed_args(WSL_STATUS_ARGS)).outcome;
-
-    // The version probe only runs once the status probe proved WSL answers at
-    // all. Spawning `wsl.exe --version` against an absent or wedged WSL would
-    // just spend another COMMAND_TIMEOUT_SECS to learn what we already know,
-    // and the preflight ignores the version on those branches anyway.
     let version = if matches!(status, CommandOutcome::Success) {
         read_wsl_version()
     } else {
         None
     };
+    let preflight = provisioning_preflight(status, version);
+    if preflight.state == OperationState::Blocked {
+        return preflight;
+    }
 
-    provisioning_preflight(status, version)
+    // Step 2: Fetch manifest + signature from update channel
+    let (manifest_bytes, signature_bytes) = match fetch_manifest_and_signature() {
+        Ok(v) => v,
+        Err(e) => {
+            return RuntimeOperationResult {
+                operation: RuntimeOperation::Provision,
+                state: OperationState::Failed,
+                detail: Some(format!("failed to fetch release manifest: {e}")),
+            };
+        }
+    };
+
+    // Step 3: Verify signature
+    let verified = match verify_release_manifest(&manifest_bytes, &signature_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            return RuntimeOperationResult {
+                operation: RuntimeOperation::Provision,
+                state: OperationState::Failed,
+                detail: Some(format!("release manifest verification failed: {e}")),
+            };
+        }
+    };
+
+    // Step 4: Parse manifest
+    let manifest: ReleaseManifest = match parse_release_manifest(verified) {
+        Ok(m) => m,
+        Err(e) => {
+            return RuntimeOperationResult {
+                operation: RuntimeOperation::Provision,
+                state: OperationState::Failed,
+                detail: Some(format!("release manifest parse failed: {e}")),
+            };
+        }
+    };
+
+    // Step 5: Load installed state and decide
+    let installed = load_installed_release();
+    let decision = decide_update(&manifest, installed);
+    let decision_clone = decision; // for match
+    let decision_desc = match decision_clone {
+        UpdateDecision::Install => "first install",
+        UpdateDecision::Upgrade => "upgrade",
+        UpdateDecision::RollBackWithinBounds => "rollback within bounds",
+        UpdateDecision::AlreadyCurrent => "already current",
+        UpdateDecision::Refused(r) => {
+            return RuntimeOperationResult {
+                operation: RuntimeOperation::Provision,
+                state: OperationState::Failed,
+                detail: Some(format!("update refused: {}", r.message())),
+            };
+        }
+    };
+
+    // If already current, succeed without mutation
+    if matches!(decision, UpdateDecision::AlreadyCurrent) {
+        return RuntimeOperationResult {
+            operation: RuntimeOperation::Provision,
+            state: OperationState::Succeeded,
+            detail: Some("already running this release".to_string()),
+        };
+    }
+
+    // Step 6: Resolve runtime bundle (pinned references)
+    let bundle: RuntimeBundle = match resolve_runtime_bundle(&manifest) {
+        Ok(b) => b,
+        Err(e) => {
+            return RuntimeOperationResult {
+                operation: RuntimeOperation::Provision,
+                state: OperationState::Failed,
+                detail: Some(format!("runtime bundle resolution failed: {e}")),
+            };
+        }
+    };
+
+    // Step 7: Download and verify rootfs tarball
+    let tarball_path = match download_rootfs(&manifest, &bundle) {
+        Ok(p) => p,
+        Err(e) => {
+            return RuntimeOperationResult {
+                operation: RuntimeOperation::Provision,
+                state: OperationState::Failed,
+                detail: Some(format!("rootfs download failed: {e}")),
+            };
+        }
+    };
+
+    // Step 8: Import into WSL
+    let install_dir = compute_install_dir();
+    let import_args = match wsl_import_args(&install_dir, &tarball_path) {
+        Ok(args) => args,
+        Err(e) => {
+            return RuntimeOperationResult {
+                operation: RuntimeOperation::Provision,
+                state: OperationState::Failed,
+                detail: Some(format!("import args validation failed: {e}")),
+            };
+        }
+    };
+    let import_result = run_wsl(&import_args);
+    if !matches!(import_result.outcome, CommandOutcome::Success) {
+        return operation_result(RuntimeOperation::Provision, import_result.outcome);
+    }
+
+    // Step 9: Write wsl.conf via tee (stdin)
+    let write_conf_result = run_wsl_stdin(&fixed_args(WSL_WRITE_CONF_ARGS), WSL_CONF_CONTENTS.as_bytes());
+    if !matches!(write_conf_result.outcome, CommandOutcome::Success) {
+        return operation_result(RuntimeOperation::Provision, write_conf_result.outcome);
+    }
+
+    // Step 10: Terminate distro so systemd boots on next start
+    let terminate_result = run_wsl(&fixed_args(WSL_TERMINATE_ARGS));
+    if !matches!(terminate_result.outcome, CommandOutcome::Success) {
+        return operation_result(RuntimeOperation::Provision, terminate_result.outcome);
+    }
+
+    // Step 11: Persist new installed state
+    let new_floor = advanced_rollback_floor(&manifest, installed);
+    let new_installed = InstalledRelease {
+        sequence: manifest.release_sequence,
+        rollback_floor: new_floor,
+    };
+    if let Err(e) = persist_installed_release(&new_installed) {
+        return RuntimeOperationResult {
+            operation: RuntimeOperation::Provision,
+            state: OperationState::Failed,
+            detail: Some(format!("failed to persist installed state: {e}")),
+        };
+    }
+
+    // Step 12: Provision Docker inside the distro
+    if let Err(e) = provision_docker_in_distro() {
+        return RuntimeOperationResult {
+            operation: RuntimeOperation::Provision,
+            state: OperationState::Failed,
+            detail: Some(format!("docker provisioning failed: {e}")),
+        };
+    }
+
+    RuntimeOperationResult {
+        operation: RuntimeOperation::Provision,
+        state: OperationState::Succeeded,
+        detail: Some(format!("provisioned {} ({})", decision_desc, manifest.release_id)),
+    }
+}
+
+// --- Helpers ---
+
+#[cfg(target_os = "windows")]
+fn fetch_manifest_and_signature() -> Result<(Vec<u8>, Vec<u8>), String> {
+    let update_url = env::var("RHODIZ_UPDATE_URL")
+        .map_err(|_| "RHODIZ_UPDATE_URL environment variable not set".to_string())?;
+    let client = reqwest::blocking::Client::new();
+
+    // Fetch manifest
+    let manifest_url = format!("{}/release.json", update_url.trim_end_matches('/'));
+    let manifest_resp = client.get(&manifest_url).send()
+        .map_err(|e| format!("manifest GET failed: {e}"))?;
+    if !manifest_resp.status().is_success() {
+        return Err(format!("manifest HTTP {}", manifest_resp.status()));
+    }
+    let manifest_bytes = manifest_resp.bytes()
+        .map_err(|e| format!("manifest read failed: {e}"))?
+        .to_vec();
+
+    // Fetch signature
+    let sig_url = format!("{}/release.json.sig", update_url.trim_end_matches('/'));
+    let sig_resp = client.get(&sig_url).send()
+        .map_err(|e| format!("signature GET failed: {e}"))?;
+    if !sig_resp.status().is_success() {
+        return Err(format!("signature HTTP {}", sig_resp.status()));
+    }
+    let signature_bytes = sig_resp.bytes()
+        .map_err(|e| format!("signature read failed: {e}"))?
+        .to_vec();
+
+    Ok((manifest_bytes, signature_bytes))
+}
+
+#[cfg(target_os = "windows")]
+fn load_installed_release() -> Option<InstalledRelease> {
+    let path = installed_state_path();
+    let data = fs::read(&path).ok()?;
+    serde_json::from_slice(&data).ok()
+}
+
+#[cfg(target_os = "windows")]
+fn persist_installed_release(installed: &InstalledRelease) -> Result<(), String> {
+    let path = installed_state_path();
+    let json = serde_json::to_vec(installed).map_err(|e| e.to_string())?;
+    fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn installed_state_path() -> PathBuf {
+    let root = PathBuf::from(env::var_os("LOCALAPPDATA").unwrap());
+    root.join("RHODIZ").join("installed.json")
+}
+
+#[cfg(target_os = "windows")]
+fn compute_install_dir() -> String {
+    let root = PathBuf::from(env::var_os("LOCALAPPDATA").unwrap());
+    root.join("RHODIZ").join("Distro").to_string_lossy().to_string()
+}
+
+#[cfg(target_os = "windows")]
+fn download_rootfs(manifest: &ReleaseManifest, bundle: &RuntimeBundle) -> Result<String, String> {
+    let download_dir = download_dir_path();
+    fs::create_dir_all(&download_dir).map_err(|e| e.to_string())?;
+
+    // The manifest does not carry the tarball URL directly; it is expected
+    // alongside release.json at the same base URL as "rootfs.tar.gz".
+    // This is a convention we control on the producer side.
+    let update_url = env::var("RHODIZ_UPDATE_URL")
+        .map_err(|_| "RHODIZ_UPDATE_URL not set".to_string())?;
+    let base = update_url.trim_end_matches('/');
+    let tarball_url = format!("{}/rootfs.tar.gz", base);
+
+    let tarball_path = download_dir.join("rootfs.tar.gz");
+    let client = reqwest::blocking::Client::new();
+    let mut resp = client.get(&tarball_url).send()
+        .map_err(|e| format!("rootfs GET failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("rootfs HTTP {}", resp.status()));
+    }
+
+    let mut file = File::create(&tarball_path).map_err(|e| e.to_string())?;
+    let bytes = resp.bytes().map_err(|e| format!("rootfs read failed: {e}"))?;
+    file.write_all(&bytes).map_err(|e| e.to_string())?;
+
+    // Verify SHA256 of downloaded tarball against compose_sha256
+    let computed = sha256_hex(&tarball_path)?;
+    if computed != bundle.compose_sha256() {
+        let _ = fs::remove_file(&tarball_path);
+        return Err(format!(
+            "rootfs sha256 mismatch: expected {}, got {}",
+            bundle.compose_sha256(), computed
+        ));
+    }
+
+    Ok(tarball_path.to_string_lossy().to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn download_dir_path() -> PathBuf {
+    let root = PathBuf::from(env::var_os("LOCALAPPDATA").unwrap());
+    root.join("RHODIZ").join("Downloads")
+}
+
+#[cfg(target_os = "windows")]
+fn sha256_hex(path: &PathBuf) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 { break; }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(target_os = "windows")]
+fn run_wsl_stdin(args: &[String], stdin_bytes: &[u8]) -> ProcessCapture {
+    let Some(executable) = wsl_executable_path() else {
+        return ProcessCapture {
+            outcome: CommandOutcome::SpawnFailed,
+            stdout: Vec::new(),
+            truncated: false,
+        };
+    };
+
+    let mut child = match Command::new(executable)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            return ProcessCapture {
+                outcome: CommandOutcome::SpawnFailed,
+                stdout: Vec::new(),
+                truncated: false,
+            };
+        }
+    };
+
+    // Write stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(stdin_bytes);
+    }
+
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(|pipe| thread::spawn(move || read_bounded(pipe)));
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(|pipe| thread::spawn(move || read_bounded(pipe)));
+
+    let outcome = match child.wait_timeout(Duration::from_secs(COMMAND_TIMEOUT_SECS)) {
+        Ok(Some(status)) if status.success() => CommandOutcome::Success,
+        Ok(Some(status)) => CommandOutcome::Exit(status.code().unwrap_or(-1)),
+        Ok(None) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            CommandOutcome::TimedOut
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            CommandOutcome::SpawnFailed
+        }
+    };
+
+    let (stdout, stdout_truncated) = stdout_reader
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_else(|| (Vec::new(), true));
+    let stderr_truncated = stderr_reader
+        .and_then(|handle| handle.join().ok())
+        .map(|(_, truncated)| truncated)
+        .unwrap_or(true);
+
+    ProcessCapture {
+        outcome,
+        stdout,
+        truncated: stdout_truncated || stderr_truncated,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn provision_docker_in_distro() -> Result<(), String> {
+    // Script to install Docker Engine and Compose plugin inside the distro.
+    // Runs as root via wsl.exe --exec.
+    let script = r#"
+set -euo pipefail
+apt-get update -y
+apt-get install -y ca-certificates curl gnupg lsb-release
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+apt-get update -y
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable docker
+"#;
+
+    let args = vec![
+        "--distribution".to_string(),
+        MANAGED_DISTRO_NAME.to_string(),
+        "--user".to_string(),
+        "root".to_string(),
+        "--exec".to_string(),
+        "bash".to_string(),
+        "-c".to_string(),
+        script.to_string(),
+    ];
+
+    let result = run_wsl(&args);
+    if !matches!(result.outcome, CommandOutcome::Success) {
+        return Err(format!("docker install script exited: {:?}", result.outcome));
+    }
+    Ok(())
 }
 
 /// Reads the installed WSL version, or `None` if it cannot be established.
