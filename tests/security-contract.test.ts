@@ -694,3 +694,60 @@ test('nothing under an enterprise-licensed onyx path is vendored', async () => {
   }
   expect(await walk(process.cwd() + '/src/')).not.toContain('ee')
 })
+
+test('the vendored Opal tree matches the digest PROVENANCE.md records', async () => {
+  // Per-file checksums are reviewable for six token files and decoration for
+  // five hundred component files, so the whole vendored tree is pinned by one
+  // digest over a sorted manifest instead. It changes when anything under it
+  // changes, which is the property that matters: an edit to a vendored file is
+  // a supply-chain event whether or not anyone meant it as one.
+  const { vendorDigest } = await import('../scripts/vendor-digest.mjs')
+  const provenance = await read('PROVENANCE.md')
+
+  const recorded = /Tree digest \| `([0-9a-f]{64})` over (\d+) files/.exec(provenance)
+  expect(recorded, 'PROVENANCE.md records no tree digest').not.toBeNull()
+
+  const actual = vendorDigest()
+  expect(actual.count, 'the vendored file count changed').toBe(Number(recorded![2]))
+  expect(actual.digest, 'a vendored file was modified').toBe(recorded![1])
+})
+
+test('the vendored tree reaches no network and no persistent storage', async () => {
+  // Opal is presentational. Pinning that here means a future bump cannot
+  // quietly bring in a component that phones home, and states the one storage
+  // use that does exist rather than leaving the claim absolute and wrong.
+  const { readdir } = await import('node:fs/promises')
+  const roots = ['src/design/opal', 'src/design/shared']
+  const sources: string[] = []
+  const walk = async (dir: string) => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const path = `${dir}/${entry.name}`
+      if (entry.isDirectory()) await walk(path)
+      else if (/\.tsx?$/.test(entry.name)) sources.push(path)
+    }
+  }
+  for (const root of roots) await walk(process.cwd() + '/' + root)
+  expect(sources.length).toBe(378)
+
+  const banned = [
+    'fetch(', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'sendBeacon',
+    'eval(', 'dangerouslySetInnerHTML', 'localStorage', 'document.cookie',
+  ]
+  const offenders: string[] = []
+  for (const file of sources) {
+    const text = await readFile(file, 'utf8')
+    for (const needle of banned) {
+      if (text.includes(needle)) offenders.push(`${needle} in ${file}`)
+    }
+  }
+  expect(offenders).toEqual([])
+
+  // The one exception, named so it cannot grow silently.
+  const withSessionStorage: string[] = []
+  for (const file of sources) {
+    if ((await readFile(file, 'utf8')).includes('sessionStorage')) {
+      withSessionStorage.push(file.slice(process.cwd().length + 1))
+    }
+  }
+  expect(withSessionStorage).toEqual(['src/design/opal/layouts/sidebar/components.tsx'])
+})

@@ -1,6 +1,11 @@
 @import "tailwindcss";
 @import "./design/tokens.css";
 @import "./design/theme.css";
+@import "./design/opal/root.css";
+
+/* Tailwind 4 scans imported sources for class names; the vendored library is
+ * outside src/ as far as its default heuristic is concerned. */
+@source "./design/opal";
 
 /* The design system is onyx-foss's: tokens vendored from `web/lib/shared`,
  * compiled by scripts/build-tokens.mjs, exposed under the same utility names
