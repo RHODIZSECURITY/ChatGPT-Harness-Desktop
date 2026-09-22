@@ -1,7 +1,11 @@
 import { readFile } from 'node:fs/promises'
 import { expect, test } from 'vitest'
 
-const read = (relative: string) => readFile(new URL('../' + relative, import.meta.url), 'utf8')
+// Every assertion below is a source-text contract: `indexOf` offsets and `$`
+// anchors both change meaning under CRLF, and the Windows CI runner checks out
+// with CRLF. Normalise once, here, so no individual test has to remember.
+const read = async (relative: string) =>
+  (await readFile(new URL('../' + relative, import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
 
 test('Tauri shell is local-only with a non-null CSP and production devtools disabled', async () => {
   const config = JSON.parse(await read('src-tauri/tauri.conf.json'))
