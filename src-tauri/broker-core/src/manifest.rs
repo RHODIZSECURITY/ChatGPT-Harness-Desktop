@@ -107,6 +107,18 @@ impl ManifestVerifyError {
     }
 }
 
+/// Delegates to [`ManifestVerifyError::message`] so the operator-facing prose has exactly
+/// one definition. Writing it twice would let the two drift, and the coarseness of that prose is a security
+/// property: it says what was refused, never how far verification got. A
+/// second rendering is a second chance to leak that.
+impl std::fmt::Display for ManifestVerifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str((*self).message())
+    }
+}
+
+impl std::error::Error for ManifestVerifyError {}
+
 /// A borrow of manifest bytes whose signature has been verified.
 ///
 /// The field is private and no constructor is exported, so the only way to
@@ -626,5 +638,31 @@ mod tests {
             verify_manifest_with_key(&hex(VECTOR_PUBLIC_KEY), VECTOR_MANIFEST, truncated),
             Err(ManifestVerifyError::MalformedSignature),
         );
+    }
+
+    /// Every variant, so a future one cannot be added with prose that only
+    /// `message()` knows about.
+    #[test]
+    fn display_renders_exactly_the_message_text() {
+        for e in [
+            ManifestVerifyError::NoTrustAnchor,
+            ManifestVerifyError::EmptyManifest,
+            ManifestVerifyError::ManifestTooLarge,
+            ManifestVerifyError::MalformedPublicKey,
+            ManifestVerifyError::WeakPublicKey,
+            ManifestVerifyError::MalformedSignature,
+            ManifestVerifyError::SignatureMismatch,
+        ] {
+            assert_eq!(e.to_string(), e.message());
+        }
+    }
+
+    /// The coarseness is the point: an operator-facing rendering that named
+    /// the offending bytes would hand an attacker a verification oracle.
+    #[test]
+    fn display_never_leaks_manifest_bytes() {
+        let rendered = ManifestVerifyError::SignatureMismatch.to_string();
+        assert!(!rendered.contains('\n'));
+        assert!(rendered.ends_with("refusing to verify"));
     }
 }

@@ -56,6 +56,18 @@ impl ManifestParseError {
     }
 }
 
+/// Delegates to [`ManifestParseError::message`] so the operator-facing prose has exactly
+/// one definition. Writing it twice would let the two drift, and a refusal is the only
+/// thing an operator sees when provisioning stops, so it must say the same
+/// thing however it was rendered.
+impl std::fmt::Display for ManifestParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str((*self).message())
+    }
+}
+
+impl std::error::Error for ManifestParseError {}
+
 /// A container image pinned by digest.
 ///
 /// There is deliberately no field for a tag. A tag is a mutable pointer, so
@@ -360,6 +372,17 @@ impl BundleError {
         }
     }
 }
+
+/// Delegates to [`BundleError::message`] so the operator-facing prose has exactly
+/// one definition. Writing it twice would let the two drift, and a reader comparing a log line against the source would find neither
+/// copy authoritative.
+impl std::fmt::Display for BundleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+impl std::error::Error for BundleError {}
 
 /// Resolves a parsed manifest's runtime section into a [`RuntimeBundle`].
 ///
@@ -876,5 +899,38 @@ mod tests {
                 role: "public".to_string()
             })
         );
+    }
+
+    #[test]
+    fn manifest_parse_error_display_renders_exactly_the_message_text() {
+        for e in [
+            ManifestParseError::Malformed,
+            ManifestParseError::UnsupportedSchema,
+            ManifestParseError::UnpinnedImage,
+            ManifestParseError::RollbackFloorViolated,
+        ] {
+            assert_eq!(e.to_string(), e.message());
+        }
+    }
+
+    /// `BundleError::message` returns an owned String built from the role, so
+    /// the delegation has to carry the role through too.
+    #[test]
+    fn bundle_error_display_renders_exactly_the_message_text() {
+        for e in [
+            BundleError::NoImages,
+            BundleError::ComposeDigestUnpinned,
+            BundleError::RepositoryEmpty {
+                role: "public".to_string(),
+            },
+            BundleError::RepositoryCarriesItsOwnReference {
+                role: "core".to_string(),
+            },
+            BundleError::ImageUnpinned {
+                role: "memory".to_string(),
+            },
+        ] {
+            assert_eq!(e.to_string(), e.message());
+        }
     }
 }

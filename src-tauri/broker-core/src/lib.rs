@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Detached-signature verification for the release manifest. It lives in its
 /// own module because the ordering it enforces — verify the exact bytes
@@ -43,7 +43,12 @@ pub const STAGING_DISTRO_NAME: &str = "RHODIZ-Harness-Next";
 /// recording which name is active — not moving a distro between names. The
 /// two names are therefore slots that alternate across updates, and neither
 /// one is permanently "the production distro".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// The serde spelling is the variant name, not its position: a slot recorded
+/// on disk as `0`/`1` would silently point at the wrong distro if the variants
+/// were ever reordered, and the wrong distro here is the live one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DistroSlot {
     /// `MANAGED_DISTRO_NAME`. The slot a first install lands in.
     Primary,
@@ -76,74 +81,64 @@ impl DistroSlot {
 pub const RUNTIME_BOOTSTRAP_UNIT: &str = "rhodiz-harness-bootstrap.service";
 pub const WSL_EXE: &str = "wsl.exe";
 pub const WSL_STATUS_ARGS: [&str; 1] = ["--status"];
-pub const WSL_START_ARGS: [&str; 8] = [
-    "--distribution",
-    MANAGED_DISTRO_NAME,
-    "--user",
-    "root",
-    "--exec",
-    "systemctl",
-    "start",
-    RUNTIME_BOOTSTRAP_UNIT,
-];
-pub const WSL_STOP_ARGS: [&str; 8] = [
-    "--distribution",
-    MANAGED_DISTRO_NAME,
-    "--user",
-    "root",
-    "--exec",
-    "systemctl",
-    "stop",
-    RUNTIME_BOOTSTRAP_UNIT,
-];
+/// Every distro-scoped systemctl vector, which differ only in the verb.
+///
+/// A `const fn` returning a fixed-length array of `&'static str`: the vectors
+/// stay allocation-free and as auditable as the constants they replaced, and
+/// the slot is the only thing a caller can vary.
+const fn systemctl_args(slot: DistroSlot, verb: &'static str) -> [&'static str; 8] {
+    [
+        "--distribution",
+        slot.distro_name(),
+        "--user",
+        "root",
+        "--exec",
+        "systemctl",
+        verb,
+        RUNTIME_BOOTSTRAP_UNIT,
+    ]
+}
+
+pub const fn wsl_start_args(slot: DistroSlot) -> [&'static str; 8] {
+    systemctl_args(slot, "start")
+}
+
+pub const fn wsl_stop_args(slot: DistroSlot) -> [&'static str; 8] {
+    systemctl_args(slot, "stop")
+}
+
 /// Read-only probe. `systemctl is-active` mutates nothing, so verification can
 /// run while a lifecycle mutation holds the lock.
-pub const WSL_VERIFY_ARGS: [&str; 8] = [
-    "--distribution",
-    MANAGED_DISTRO_NAME,
-    "--user",
-    "root",
-    "--exec",
-    "systemctl",
-    "is-active",
-    RUNTIME_BOOTSTRAP_UNIT,
-];
-/// Clears a latched failure so the restart below is not refused by a start-limit
-/// counter. Best-effort: see `WSL_REPAIR_RESTART_ARGS`.
-pub const WSL_REPAIR_RESET_ARGS: [&str; 8] = [
-    "--distribution",
-    MANAGED_DISTRO_NAME,
-    "--user",
-    "root",
-    "--exec",
-    "systemctl",
-    "reset-failed",
-    RUNTIME_BOOTSTRAP_UNIT,
-];
+pub const fn wsl_verify_args(slot: DistroSlot) -> [&'static str; 8] {
+    systemctl_args(slot, "is-active")
+}
+
+/// Clears a latched failure so the restart below is not refused by a
+/// start-limit counter. Best-effort: see `wsl_repair_restart_args`.
+pub const fn wsl_repair_reset_args(slot: DistroSlot) -> [&'static str; 8] {
+    systemctl_args(slot, "reset-failed")
+}
+
 /// The step whose outcome decides the repair result.
-pub const WSL_REPAIR_RESTART_ARGS: [&str; 8] = [
-    "--distribution",
-    MANAGED_DISTRO_NAME,
-    "--user",
-    "root",
-    "--exec",
-    "systemctl",
-    "restart",
-    RUNTIME_BOOTSTRAP_UNIT,
-];
-pub const WSL_LOG_ARGS_PREFIX: [&str; 11] = [
-    "--distribution",
-    MANAGED_DISTRO_NAME,
-    "--user",
-    "root",
-    "--exec",
-    "journalctl",
-    "--unit",
-    RUNTIME_BOOTSTRAP_UNIT,
-    "--no-pager",
-    "--output=short-iso",
-    "--lines",
-];
+pub const fn wsl_repair_restart_args(slot: DistroSlot) -> [&'static str; 8] {
+    systemctl_args(slot, "restart")
+}
+
+pub const fn wsl_log_args_prefix(slot: DistroSlot) -> [&'static str; 11] {
+    [
+        "--distribution",
+        slot.distro_name(),
+        "--user",
+        "root",
+        "--exec",
+        "journalctl",
+        "--unit",
+        RUNTIME_BOOTSTRAP_UNIT,
+        "--no-pager",
+        "--output=short-iso",
+        "--lines",
+    ]
+}
 
 pub const DEFAULT_LOG_LINES: u16 = 200;
 pub const MAX_LOG_LINES: u16 = 500;
@@ -482,8 +477,8 @@ pub const WSL_VERSION_ARGS: [&str; 1] = ["--version"];
 /// Required after writing `/etc/wsl.conf`: WSL reads that file at boot, so a
 /// running distro keeps the configuration it started with and systemd would
 /// appear not to have been enabled.
-pub fn wsl_terminate_args(slot: DistroSlot) -> [String; 2] {
-    ["--terminate".to_string(), slot.distro_name().to_string()]
+pub const fn wsl_terminate_args(slot: DistroSlot) -> [&'static str; 2] {
+    ["--terminate", slot.distro_name()]
 }
 
 /// Written to `/etc/wsl.conf` to turn systemd on inside the managed distro.
@@ -500,14 +495,14 @@ pub const WSL_CONF_CONTENTS: &str = "[boot]\nsystemd=true\n";
 /// reads the bytes from stdin and writes them, so the content never passes
 /// through anything that could interpret it, and the argument vector stays
 /// fixed and auditable.
-pub fn wsl_write_conf_args(slot: DistroSlot) -> [String; 6] {
+pub const fn wsl_write_conf_args(slot: DistroSlot) -> [&'static str; 6] {
     [
-        "--distribution".to_string(),
-        slot.distro_name().to_string(),
-        "--user".to_string(),
-        "root".to_string(),
-        "--exec".to_string(),
-        "tee".to_string(),
+        "--distribution",
+        slot.distro_name(),
+        "--user",
+        "root",
+        "--exec",
+        "tee",
     ]
 }
 
@@ -530,6 +525,17 @@ impl ImportArgsError {
         }
     }
 }
+
+/// Delegates to [`ImportArgsError::message`] so the operator-facing prose has exactly
+/// one definition. Writing it twice would let the two drift, and a refusal naming a path is the
+/// operator's only signal that provisioning stopped before running wsl.exe.
+impl std::fmt::Display for ImportArgsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str((*self).message())
+    }
+}
+
+impl std::error::Error for ImportArgsError {}
 
 /// Builds the argument vector that imports the runtime rootfs.
 ///
@@ -582,11 +588,8 @@ pub fn wsl_import_args(
 /// after a failure, and to reclaim the superseded one after a successful
 /// swap. In both cases "the slot that is not live" is the correct target, so
 /// one vector serves both and neither can be aimed at the live distro.
-pub fn wsl_discard_inactive_args(active: DistroSlot) -> [String; 2] {
-    [
-        "--unregister".to_string(),
-        active.other().distro_name().to_string(),
-    ]
+pub const fn wsl_discard_inactive_args(active: DistroSlot) -> [&'static str; 2] {
+    ["--unregister", active.other().distro_name()]
 }
 
 /// Interim floor for the WSL2 feature set the broker relies on. The release
@@ -746,8 +749,8 @@ pub fn normalize_log_lines(requested: Option<u16>) -> u16 {
         .clamp(1, MAX_LOG_LINES)
 }
 
-pub fn runtime_log_args(requested: Option<u16>) -> Vec<String> {
-    let mut args = WSL_LOG_ARGS_PREFIX
+pub fn runtime_log_args(slot: DistroSlot, requested: Option<u16>) -> Vec<String> {
+    let mut args = wsl_log_args_prefix(slot)
         .iter()
         .map(|value| (*value).to_string())
         .collect::<Vec<_>>();
@@ -809,7 +812,7 @@ mod tests {
         assert_eq!(WSL_EXE, "wsl.exe");
         assert_eq!(WSL_STATUS_ARGS, ["--status"]);
         assert_eq!(
-            WSL_START_ARGS,
+            wsl_start_args(DistroSlot::INITIAL),
             [
                 "--distribution",
                 "RHODIZ-Harness",
@@ -822,7 +825,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            WSL_STOP_ARGS,
+            wsl_stop_args(DistroSlot::INITIAL),
             [
                 "--distribution",
                 "RHODIZ-Harness",
@@ -842,7 +845,7 @@ mod tests {
         assert_eq!(normalize_log_lines(Some(0)), 1);
         assert_eq!(normalize_log_lines(Some(MAX_LOG_LINES + 1)), MAX_LOG_LINES);
 
-        let args = runtime_log_args(Some(9));
+        let args = runtime_log_args(DistroSlot::INITIAL, Some(9));
         assert_eq!(args.last().map(String::as_str), Some("9"));
         assert!(args.contains(&"journalctl".to_string()));
         assert!(args.contains(&"rhodiz-harness-bootstrap.service".to_string()));
@@ -939,7 +942,7 @@ mod tests {
     #[test]
     fn verify_and_repair_arg_vectors_are_fixed_and_shell_free() {
         assert_eq!(
-            WSL_VERIFY_ARGS,
+            wsl_verify_args(DistroSlot::INITIAL),
             [
                 "--distribution",
                 "RHODIZ-Harness",
@@ -951,19 +954,30 @@ mod tests {
                 "rhodiz-harness-bootstrap.service"
             ]
         );
-        assert_eq!(WSL_REPAIR_RESET_ARGS[6], "reset-failed");
-        assert_eq!(WSL_REPAIR_RESTART_ARGS[6], "restart");
+        assert_eq!(
+            wsl_repair_reset_args(DistroSlot::INITIAL)[6],
+            "reset-failed"
+        );
+        assert_eq!(wsl_repair_restart_args(DistroSlot::INITIAL)[6], "restart");
 
-        for args in [
-            WSL_VERIFY_ARGS,
-            WSL_REPAIR_RESET_ARGS,
-            WSL_REPAIR_RESTART_ARGS,
-        ] {
-            assert_eq!(args[1], MANAGED_DISTRO_NAME);
-            assert_eq!(args[7], RUNTIME_BOOTSTRAP_UNIT);
-            assert!(!args.iter().any(|arg| *arg == "sh" || *arg == "bash"));
-            assert!(!args.iter().any(|arg| arg.contains("powershell")));
-            assert!(!args.iter().any(|arg| arg.contains("cmd.exe")));
+        // Every slot-addressed vector must name the slot it was asked for and
+        // nothing else: a lifecycle command that silently addressed the other
+        // slot would operate on a distro the operator is not running.
+        for slot in [DistroSlot::Primary, DistroSlot::Secondary] {
+            for args in [
+                wsl_verify_args(slot),
+                wsl_repair_reset_args(slot),
+                wsl_repair_restart_args(slot),
+                wsl_start_args(slot),
+                wsl_stop_args(slot),
+            ] {
+                assert_eq!(args[1], slot.distro_name());
+                assert_eq!(args[7], RUNTIME_BOOTSTRAP_UNIT);
+                assert!(!args.iter().any(|arg| *arg == "sh" || *arg == "bash"));
+                assert!(!args.iter().any(|arg| arg.contains("powershell")));
+                assert!(!args.iter().any(|arg| arg.contains("cmd.exe")));
+            }
+            assert_eq!(wsl_log_args_prefix(slot)[1], slot.distro_name());
         }
     }
 
@@ -971,7 +985,12 @@ mod tests {
     fn repair_never_provisions_installs_or_deletes() {
         // The bounded remedy is restarting a unit. Anything that could create or
         // destroy a distribution must stay out of these vectors.
-        for args in [WSL_REPAIR_RESET_ARGS, WSL_REPAIR_RESTART_ARGS] {
+        for args in [
+            wsl_repair_reset_args(DistroSlot::Primary),
+            wsl_repair_restart_args(DistroSlot::Primary),
+            wsl_repair_reset_args(DistroSlot::Secondary),
+            wsl_repair_restart_args(DistroSlot::Secondary),
+        ] {
             for forbidden in [
                 "--install",
                 "--import",
@@ -1212,7 +1231,7 @@ mod tests {
             // config file is where a shell is most tempting and least
             // defensible.
             for arg in write_conf.iter().chain(&terminate).chain(&discard) {
-                assert!(arg != "sh" && arg != "bash", "{arg} is a shell");
+                assert!(*arg != "sh" && *arg != "bash", "{arg} is a shell");
                 assert!(!arg.contains("powershell"));
                 assert!(!arg.contains("cmd.exe"));
                 // No redirection, no separators: nothing that only means
@@ -1350,5 +1369,40 @@ mod tests {
         .expect("paths with spaces and ampersands are ordinary on Windows");
         assert_eq!(args[2], r"C:\Users\Ada & Co\distro");
         assert_eq!(args[3], r"C:\tmp\root fs.tar");
+    }
+
+    #[test]
+    fn import_args_error_display_renders_exactly_the_message_text() {
+        for e in [
+            ImportArgsError::PathLooksLikeAFlag,
+            ImportArgsError::PathEmpty,
+        ] {
+            assert_eq!(e.to_string(), e.message());
+        }
+    }
+
+    /// The broker records the active slot on disk. Pinning the spelling here
+    /// means a variant rename shows up as a failing test rather than as a
+    /// state file that silently reads back as the other slot.
+    #[test]
+    fn distro_slot_serializes_under_its_variant_name() {
+        assert_eq!(
+            serde_json::to_string(&DistroSlot::Primary).expect("slot serializes"),
+            "\"primary\"",
+        );
+        assert_eq!(
+            serde_json::to_string(&DistroSlot::Secondary).expect("slot serializes"),
+            "\"secondary\"",
+        );
+    }
+
+    #[test]
+    fn distro_slot_round_trips_through_json() {
+        for slot in [DistroSlot::Primary, DistroSlot::Secondary] {
+            let encoded = serde_json::to_string(&slot).expect("slot serializes");
+            let decoded: DistroSlot = serde_json::from_str(&encoded).expect("slot deserializes");
+            assert_eq!(decoded, slot);
+            assert_eq!(decoded.distro_name(), slot.distro_name());
+        }
     }
 }
