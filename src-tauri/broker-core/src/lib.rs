@@ -552,6 +552,59 @@ pub const fn wsl_write_conf_args(slot: DistroSlot) -> [&'static str; 6] {
     ]
 }
 
+/// Installs Docker Engine and the Compose plugin inside a freshly imported
+/// distro.
+///
+/// This is the one vector in this module that does go through a shell, and it
+/// is not the lapse `wsl_write_conf_args` warns about. That warning is about
+/// handing *content* to an interpreter: `/etc/wsl.conf` is data, so passing it
+/// through `bash` would let characters inside it change what runs. This script
+/// is not data. It is a fixed sequence of package-manager steps, compiled into
+/// the binary, with nothing interpolated into it at any call site -- so there
+/// is no value for a shell to reinterpret. What it needs from a shell is
+/// sequencing and `set -euo pipefail`, which no single `--exec` can express.
+///
+/// What it does still carry is an unpinned network install: the script adds
+/// Docker's own apt repository and installs from it, so the packages that end
+/// up inside the runtime are whatever that repository serves at provisioning
+/// time, not what the signed manifest names. The manifest covers the rootfs;
+/// it does not cover this. That gap is recorded here rather than hidden, and
+/// closing it means pinning the package versions or shipping them in the
+/// rootfs.
+pub const DOCKER_PROVISION_SCRIPT: &str = r#"
+set -euo pipefail
+apt-get update -y
+apt-get install -y ca-certificates curl gnupg lsb-release
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+apt-get update -y
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable docker
+"#;
+
+/// Argument vector for the Docker install, aimed at one slot.
+///
+/// The slot is a parameter for the same reason every other provisioning vector
+/// takes one: an update stages into the distro that is *not* serving, and a
+/// Docker install that named the primary distro unconditionally would run
+/// inside the runtime the operator is still using while leaving the staged one
+/// without a container engine -- mutating the live release to provision a new
+/// one, which is precisely what staging exists to prevent.
+pub fn wsl_docker_provision_args(slot: DistroSlot) -> [&'static str; 8] {
+    [
+        "--distribution",
+        slot.distro_name(),
+        "--user",
+        "root",
+        "--exec",
+        "bash",
+        "-c",
+        DOCKER_PROVISION_SCRIPT,
+    ]
+}
+
 /// Why an import was refused before `wsl.exe` was ever spawned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImportArgsError {
@@ -1323,6 +1376,42 @@ mod tests {
                 assert!(!arg.contains('>') && !arg.contains('|') && !arg.contains(';'));
             }
         }
+    }
+
+    #[test]
+    fn the_docker_install_is_aimed_at_the_slot_it_is_given() {
+        for slot in [DistroSlot::Primary, DistroSlot::Secondary] {
+            let args = wsl_docker_provision_args(slot);
+
+            // The whole point of the parameter: an update provisions Docker
+            // into the distro it just staged, never into the one still
+            // serving.
+            assert_eq!(args[1], slot.distro_name());
+            assert_ne!(args[1], slot.other().distro_name());
+
+            // The script is a constant, not something assembled per call, so
+            // the two slots differ in exactly one argument.
+            assert_eq!(args[7], DOCKER_PROVISION_SCRIPT);
+            assert_eq!(
+                args.len() - 1,
+                wsl_docker_provision_args(slot.other())
+                    .iter()
+                    .zip(args.iter())
+                    .filter(|(a, b)| a == b)
+                    .count(),
+                "the slot name must be the only difference between the two vectors"
+            );
+        }
+
+        // This vector does run a shell, which no other one in this module
+        // does. Pinning that here means adding a shell somewhere else is a
+        // test failure rather than a quiet precedent.
+        let args = wsl_docker_provision_args(DistroSlot::INITIAL);
+        assert_eq!(args[5], "bash");
+        assert_eq!(args[6], "-c");
+        // Root is required to install packages, and is what makes aiming at
+        // the wrong slot destructive rather than merely wrong.
+        assert_eq!(args[3], "root");
     }
 
     #[test]

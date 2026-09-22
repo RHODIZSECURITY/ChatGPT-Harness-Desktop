@@ -11,9 +11,9 @@ use rhodiz_harness_broker_core::{
 use rhodiz_harness_broker_core::{
     advanced_rollback_floor, decide_update, decode_utf16le, extract_wsl_version,
     parse_release_manifest, provisioning_preflight, resolve_runtime_bundle, runtime_log_args,
-    verify_release_manifest, wsl_discard_inactive_args, wsl_import_args, wsl_start_args,
-    wsl_stop_args, wsl_terminate_args, wsl_write_conf_args, DistroSlot, InstalledRelease,
-    ReleaseManifest, RuntimeBundle, UpdateDecision, MANAGED_DISTRO_NAME, MANIFEST_SIGNATURE_LEN,
+    verify_release_manifest, wsl_discard_inactive_args, wsl_docker_provision_args, wsl_import_args,
+    wsl_start_args, wsl_stop_args, wsl_terminate_args, wsl_write_conf_args, DistroSlot,
+    InstalledRelease, ReleaseManifest, RuntimeBundle, UpdateDecision, MANIFEST_SIGNATURE_LEN,
     MAX_MANIFEST_BYTES, WSL_CONF_CONTENTS, WSL_VERSION_ARGS,
 };
 
@@ -637,7 +637,7 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
         ProvisioningStep::InstallDocker,
         "Installing Docker inside the distro",
     );
-    if let Err(e) = provision_docker_in_distro() {
+    if let Err(e) = provision_docker_in_distro(target_slot) {
         return RuntimeOperationResult {
             operation: RuntimeOperation::Provision,
             state: OperationState::Failed,
@@ -1098,34 +1098,13 @@ fn run_wsl_stdin(args: &[String], stdin_bytes: &[u8]) -> ProcessCapture {
 }
 
 #[cfg(target_os = "windows")]
-fn provision_docker_in_distro() -> Result<(), String> {
-    // Script to install Docker Engine and Compose plugin inside the distro.
-    // Runs as root via wsl.exe --exec.
-    let script = r#"
-set -euo pipefail
-apt-get update -y
-apt-get install -y ca-certificates curl gnupg lsb-release
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-chmod a+r /etc/apt/keyrings/docker.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
-apt-get update -y
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-systemctl enable docker
-"#;
-
-    let args = vec![
-        "--distribution".to_string(),
-        MANAGED_DISTRO_NAME.to_string(),
-        "--user".to_string(),
-        "root".to_string(),
-        "--exec".to_string(),
-        "bash".to_string(),
-        "-c".to_string(),
-        script.to_string(),
-    ];
-
-    let result = run_wsl(&args);
+fn provision_docker_in_distro(slot: DistroSlot) -> Result<(), String> {
+    // The slot is the one just imported, not the one serving. Every other step
+    // in this pipeline is aimed the same way, and this one has the most to
+    // lose by not being: it runs as root and installs packages, so aiming it
+    // at the live distro would mutate the release the operator is still using
+    // in order to provision its replacement.
+    let result = run_wsl(&fixed_args(wsl_docker_provision_args(slot)));
     if !matches!(result.outcome, CommandOutcome::Success) {
         return Err(format!(
             "docker install script exited: {:?}",

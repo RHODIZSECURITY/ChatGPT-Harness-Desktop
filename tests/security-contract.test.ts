@@ -179,6 +179,45 @@ test('the update stages into the inactive slot and destroys nothing until the sw
   expect(reclaimAt).toBeGreaterThan(persistAt)
 })
 
+test('every distro-scoped provisioning step names the staged slot, including the Docker install', async () => {
+  const core = await read('src-tauri/broker-core/src/lib.rs')
+  const broker = await read('src-tauri/src/broker.rs')
+
+  // Provisioning runs four commands against a distro. All four take the slot
+  // as a parameter, so none of them can be aimed at the live release by
+  // omission -- which is what the Docker install did while it named the
+  // primary distro unconditionally.
+  for (const call of [
+    'wsl_import_args(target_slot,',
+    'wsl_write_conf_args(target_slot)',
+    'wsl_terminate_args(target_slot)',
+    'wsl_docker_provision_args(slot)',
+  ]) {
+    expect(broker).toContain(call)
+  }
+  // The Docker vector is reached through a helper, so the staged slot has to
+  // arrive at that helper too.
+  expect(broker).toContain('provision_docker_in_distro(target_slot)')
+
+  // The Docker install is the one step that runs as root inside the distro,
+  // so aiming it at the wrong slot mutates the running release rather than
+  // merely failing.
+  expect(core).toContain('pub fn wsl_docker_provision_args(slot: DistroSlot)')
+  expect(core).toContain('slot.distro_name(),')
+  expect(broker).not.toContain('MANAGED_DISTRO_NAME')
+
+  // The script is a compile-time constant with nothing interpolated into it.
+  // A format! or a push_str here would turn the one shell in the codebase
+  // into an injection surface.
+  expect(core).toContain('pub const DOCKER_PROVISION_SCRIPT: &str')
+  const scriptStart = core.indexOf('pub const DOCKER_PROVISION_SCRIPT')
+  const scriptEnd = core.indexOf('"#;', scriptStart)
+  expect(scriptEnd).toBeGreaterThan(scriptStart)
+  const script = core.slice(scriptStart, scriptEnd)
+  expect(script).not.toContain('{}')
+  expect(script).not.toContain('format!')
+})
+
 test('log redaction matches credential prefixes only at token boundaries', async () => {
   const core = await read('src-tauri/broker-core/src/lib.rs')
   expect(core).toContain('SENSITIVE_TOKEN_PREFIXES')
