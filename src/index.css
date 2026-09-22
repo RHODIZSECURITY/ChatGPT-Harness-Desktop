@@ -1,2 +1,52 @@
-html { background: #0f1116; }
-body { margin: 0; min-width: 960px; min-height: 100vh; }
+@import "tailwindcss";
+
+/* Semantic token layer.
+ *
+ * The naming follows the architecture used by the openhands reference tree
+ * (PROVENANCE.md): surfaces are named by elevation rather than by the widget
+ * that happens to use them, so a component asks for "raised" and never for
+ * "the sidebar colour". No openhands code is copied — their token values are
+ * welded to HeroUI's HSL channel variables, which this project does not use.
+ *
+ * Brand values are read off src-tauri/icons/32x32.png so the window chrome and
+ * the taskbar icon agree: cyan is the mark, amber is its counterweight.
+ */
+@theme {
+  /* Elevation. Deep is recessed (status bar), overlay is lifted (cards). */
+  --color-surface-deep: #0b0d12;
+  --color-surface: #0f1116;
+  --color-surface-raised: #141821;
+  --color-surface-overlay: #171c25;
+
+  /* Edges. Strong is for a boundary the eye must not lose. */
+  --color-edge: #232834;
+  --color-edge-strong: #2f3544;
+
+  /* Content, in descending prominence. Dim is for "exists but not yet". */
+  --color-content: #e7e9ee;
+  --color-content-muted: #9ba7bb;
+  --color-content-dim: #667186;
+
+  /* Brand. */
+  --color-brand: #22cde3;
+  --color-accent: #ffc62f;
+
+  /* Runtime status. These are load-bearing: the status bar is the only live
+   * data in the shell, so its colours carry meaning and are not decoration. */
+  --color-ok: #3fb950;
+  --color-warn: #ffc62f;
+  --color-bad: #f85149;
+
+  --font-sans: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--color-surface);
+  color: var(--color-content);
+}
+
+#root {
+  min-height: 100vh;
+}
