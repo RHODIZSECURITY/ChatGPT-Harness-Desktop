@@ -1,14 +1,18 @@
 import { beforeEach, expect, test, vi } from 'vitest'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }))
 
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import {
   BROKER_COMMANDS,
   DEFAULT_RUNTIME_LOG_LINES,
   MAX_RUNTIME_LOG_LINES,
+  PROVISIONING_EVENT,
   getRuntimeLogs,
   getRuntimeStatus,
+  listenProvisioningProgress,
   normalizeRuntimeLogLines,
   provisionRuntime,
   repairRuntime,
@@ -68,4 +72,34 @@ test('log requests clamp non-finite, fractional, low and high values', async () 
   expect(invoke).toHaveBeenNthCalledWith(2, 'runtime_logs', { lines: 1 })
   expect(invoke).toHaveBeenNthCalledWith(3, 'runtime_logs', { lines: 12 })
   expect(invoke).toHaveBeenNthCalledWith(4, 'runtime_logs', { lines: 500 })
+})
+
+test('provisioning progress is delivered unwrapped, from one named event, and stays unsubscribable', async () => {
+  const unlisten = vi.fn()
+  let handler: ((event: { payload: unknown }) => void) | undefined
+  vi.mocked(listen).mockImplementation(async (_event, cb) => {
+    handler = cb as (event: { payload: unknown }) => void
+    return unlisten
+  })
+
+  const received: unknown[] = []
+  const stop = await listenProvisioningProgress((payload) => received.push(payload))
+
+  // One event name, and it is the one the broker emits. A renderer listening
+  // on a name nothing publishes fails silently: provisioning appears frozen.
+  expect(listen).toHaveBeenCalledTimes(1)
+  expect(vi.mocked(listen).mock.calls[0]![0]).toBe(PROVISIONING_EVENT)
+  expect(PROVISIONING_EVENT).toBe('provisioning-progress')
+
+  // The listener receives the payload, not the Tauri envelope around it. A
+  // caller handed the envelope would read `step` as undefined and render a
+  // blank step for every message.
+  const payload = { step: 'install-docker', detail: 'Installing Docker inside the distro' }
+  handler?.({ payload })
+  handler?.({ payload: { step: 'swap', detail: 'done' } })
+  expect(received).toEqual([payload, { step: 'swap', detail: 'done' }])
+
+  // The unlisten handle is passed straight through, so a component that
+  // unmounts mid-provision can actually detach.
+  expect(stop).toBe(unlisten)
 })

@@ -32,6 +32,22 @@ threads bounded to `MAX_CAPTURE_BYTES`. Each call is bounded by
 `COMMAND_TIMEOUT_SECS`; on expiry the child is killed and the outcome is
 reported as `timed_out`, never as success.
 
+Every distro-scoped vector names a **slot** rather than a distro. Two managed
+distros can exist at once while an update is staged, and which one is serving is
+a fact that lives in the broker's state file, not in the binary. It is read per
+command rather than cached at startup, so a swap by a concurrent provision is
+picked up by the next command instead of being shadowed by a stale value.
+
+An **unreadable state file is refused, not defaulted**. Before staging existed,
+reading a corrupt file as the primary slot could not name the wrong distro
+because no other distro existed; now it can, and the wrong guess would start,
+restart or read the logs of a runtime the operator is not running. There is no
+safe default, so all five lifecycle commands carry the failure out to the
+renderer, each in its own result shape — a failed operation, an unhealthy
+verify with everything marked unprobed, or an empty log read that is explicitly
+not a truncation. Each says why, because a refusal an operator cannot act on is
+barely better than a wrong answer.
+
 - `runtime_status` — `wsl.exe --status`; classified ready, stopped, missing or unavailable.
 - `runtime_start` / `runtime_stop` — fixed `systemctl start|stop rhodiz-harness-bootstrap.service`
   inside the managed distro. Both are serialized; a concurrent attempt returns
@@ -108,13 +124,39 @@ reported as `timed_out`, never as success.
   before refusing. With the variable unset — the default — provisioning fails
   at the first step and opens no connection at all.
 
-  **Refusal is not rollback.** A failure after the import leaves the distro on
-  disk. State is written last, deliberately: persisting first would record a
+  **The state write is the swap.** An update imports into the distro slot that
+  is *not* serving, so the runtime the operator is using keeps running through
+  the whole pipeline. The write that records the new release also records its
+  slot, and that single write is the moment the staged distro becomes live:
+  everything before it leaves the operator running exactly what they were
+  running, and a failure anywhere above it changes nothing they can observe.
+  It comes last for a second reason too — persisting first would record a
   release as installed while its runtime was still unprovisioned, and because
   the anti-rollback floor only ever rises, that record would raise the floor
-  permanently on behalf of a broken distro. So a failed provision leaves a
-  distro the broker does not consider installed, rather than a floor it cannot
-  lower. Cleaning up that distro is task 8.3c's, alongside the A/B swap.
+  permanently on behalf of a broken distro.
+
+  The target slot is derived from **whether any state exists**, not from
+  inverting the active slot. Those two agree everywhere except the case that
+  matters: with no state file nothing is serving, `active_slot()` answers the
+  primary slot for want of anything else to say, and inverting it would send a
+  first install into the secondary slot and leave the primary permanently
+  empty.
+
+  Every distro-scoped step in the pipeline — import, `wsl.conf`, terminate and
+  the Docker install — takes the slot as a parameter, so none can reach the
+  live release by omission. The Docker install is the one with the most to
+  lose: it runs as root inside the distro, so naming the primary distro
+  unconditionally would have mutated the release still in use in order to
+  provision its replacement.
+
+  **Reclaim happens only after the swap is durable**, and its failure does not
+  fail a provision that has already succeeded — the leftover distro is named in
+  the success `detail` instead, because a distro the broker meant to remove and
+  did not is something the operator has to be able to see. One case is recorded
+  rather than closed: a *first* install that fails after its import leaves a
+  distro and no state file, so a retry meets a name collision that the update
+  path clears. Clearing it would need a vector that names a slot directly,
+  which is the inversion `wsl_discard_inactive_args` exists to prevent.
 
   **The one place the broker parses stdout for anything but logs.**
   `wsl.exe --version` writes UTF-16LE, so the version cannot be read from an
@@ -235,6 +277,15 @@ that reads them:
   has no `rootfs_sha256` field to compare against. The comparison is left in
   place so the gap stays visible in the code; closing it is a change to what
   counts as a valid signed manifest, not a change to the download path.
+- **The provisioned runtime installs packages the manifest never names.** After
+  the rootfs is imported, `DOCKER_PROVISION_SCRIPT` adds Docker's own apt
+  repository inside the distro and installs `docker-ce` and the Compose plugin
+  from it. Those packages are whatever that repository serves at provisioning
+  time — unpinned, unversioned and outside the signed manifest, which covers the
+  rootfs and nothing past it. Two machines provisioned from the same signed
+  release can therefore end up with different container engines. Closing this
+  means pinning the versions or shipping them inside the rootfs; it is not
+  closed by anything in the signature path.
 - **The rootfs is bounded only by a sanity ceiling.** `MAX_ROOTFS_BYTES` (8 GiB)
   exists so a server that streams without end is refused rather than filling the
   volume. It is an order of magnitude above any plausible rootfs and expresses no
@@ -304,15 +355,18 @@ The five Windows warnings are upstream maintenance warnings, not known vulnerabi
 ## Local certification evidence
 
 - Oxlint: 0 warnings / 0 errors.
-- Vitest: 22/22 PASS.
-- Executable TypeScript/React coverage: 91.66% statements, 100% branches,
-  85.71% functions, 90.9% lines. The shortfall is `src/runtime/bridge.ts:68-69`
-  — the callback `listenProvisioningProgress` hands to Tauri's `listen`, which
-  no unit test invokes because nothing in the test environment emits the event.
-  Recorded rather than rounded up: an earlier checkpoint claimed 100%, and that
-  stopped being true when the provisioning event listener was added.
+- Vitest: 25/25 PASS.
+- Executable TypeScript/React coverage: 100% statements, branches, functions and
+  lines (24/24, 10/10, 14/14, 22/22). The previous checkpoint recorded 91.66%
+  statements with `src/runtime/bridge.ts:68-69` uncovered — the callback
+  `listenProvisioningProgress` hands to Tauri's `listen`. That gap is closed by
+  a test that mocks `listen`, drives the captured handler directly, and asserts
+  the three things the renderer depends on: the event name matches the one the
+  broker emits, the payload arrives unwrapped rather than inside the Tauri
+  envelope, and the unlisten handle is passed through so a component unmounting
+  mid-provision can detach.
 - Production renderer build: PASS.
-- Rust broker-core: 84 unit + 2 integration = 86/86 PASS, 0 doc-tests.
+- Rust broker-core: 87 unit + 2 integration = 89/89 PASS, 0 doc-tests.
 - `cargo fmt --check`: PASS.
 - Clippy with `-D warnings`: PASS.
 - `npm run verify:portable`: PASS end to end.
