@@ -2873,6 +2873,8 @@ dependencies = [
  "hex",
  "reqwest 0.12.28",
  "rhodiz-harness-broker-core",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "tauri",
  "tauri-build",

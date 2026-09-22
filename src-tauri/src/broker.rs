@@ -1,9 +1,8 @@
 use rhodiz_harness_broker_core::{
     classify_wsl_status, lifecycle_busy, lifecycle_lock_unavailable, operation_result,
-    runtime_log_args, runtime_status as build_status, sanitize_log_text, CommandOutcome,
-    OperationState, RuntimeLogsResult, RuntimeOperation, RuntimeOperationResult, RuntimeStatus,
-    RuntimeVerifyResult, COMMAND_TIMEOUT_SECS, MAX_CAPTURE_BYTES, WSL_EXE, WSL_START_ARGS,
-    WSL_STATUS_ARGS, WSL_STOP_ARGS,
+    runtime_status as build_status, sanitize_log_text, CommandOutcome, OperationState,
+    RuntimeLogsResult, RuntimeOperation, RuntimeOperationResult, RuntimeStatus,
+    RuntimeVerifyResult, COMMAND_TIMEOUT_SECS, MAX_CAPTURE_BYTES, WSL_EXE, WSL_STATUS_ARGS,
 };
 
 // The provisioning preflight only runs where there is a `wsl.exe` to probe;
@@ -11,11 +10,10 @@ use rhodiz_harness_broker_core::{
 #[cfg(target_os = "windows")]
 use rhodiz_harness_broker_core::{
     advanced_rollback_floor, decide_update, decode_utf16le, extract_wsl_version,
-    parse_release_manifest, provisioning_preflight, resolve_runtime_bundle,
-    verify_release_manifest, wsl_import_args, wsl_terminate_args, wsl_write_conf_args, BundleError,
-    DistroSlot, ImportArgsError, InstalledRelease, ManifestParseError, ReleaseManifest,
-    RuntimeBundle, UpdateDecision, UpdateRefusal, MANAGED_DISTRO_NAME, WSL_CONF_CONTENTS,
-    WSL_VERSION_ARGS,
+    parse_release_manifest, provisioning_preflight, resolve_runtime_bundle, runtime_log_args,
+    verify_release_manifest, wsl_import_args, wsl_start_args, wsl_stop_args, wsl_terminate_args,
+    wsl_write_conf_args, DistroSlot, InstalledRelease, ReleaseManifest, RuntimeBundle,
+    UpdateDecision, MANAGED_DISTRO_NAME, WSL_CONF_CONTENTS, WSL_VERSION_ARGS,
 };
 
 // `AppHandle` is referenced by both platforms (the non-Windows `platform_provision`
@@ -34,7 +32,7 @@ use rhodiz_harness_broker_core::{unsupported_operation, unsupported_verify};
 // implementations of the platform functions below.
 #[cfg(target_os = "windows")]
 use rhodiz_harness_broker_core::{
-    verify_result, WSL_REPAIR_RESET_ARGS, WSL_REPAIR_RESTART_ARGS, WSL_VERIFY_ARGS,
+    verify_result, wsl_repair_reset_args, wsl_repair_restart_args, wsl_verify_args,
 };
 
 #[cfg(target_os = "windows")]
@@ -42,7 +40,7 @@ use rhodiz_harness_broker_core::{
     lifecycle_cross_process_busy, LIFECYCLE_LOCK_DIRECTORY, LIFECYCLE_LOCK_FILE,
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, TryLockError};
 
 #[cfg(target_os = "windows")]
@@ -229,12 +227,32 @@ fn fixed_args<const N: usize>(args: [&str; N]) -> Vec<String> {
     args.iter().map(|value| (*value).to_string()).collect()
 }
 
+// Every lifecycle command is aimed at whichever slot is serving right now,
+// which is a fact that lives on disk rather than in the binary. Reading it
+// per call rather than caching it means a slot swap by a concurrent
+// provision is picked up by the next command instead of being shadowed by a
+// value read at startup.
+#[cfg(target_os = "windows")]
 fn fixed_start_args() -> Vec<String> {
-    fixed_args(WSL_START_ARGS)
+    fixed_args(wsl_start_args(active_slot()))
 }
 
+#[cfg(target_os = "windows")]
 fn fixed_stop_args() -> Vec<String> {
-    fixed_args(WSL_STOP_ARGS)
+    fixed_args(wsl_stop_args(active_slot()))
+}
+
+// There is no `wsl.exe` to aim at off Windows, and `platform_operation`
+// discards the vector there rather than spawning anything. Building a real
+// one would mean reading a state file that the fallback never writes.
+#[cfg(not(target_os = "windows"))]
+fn fixed_start_args() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn fixed_stop_args() -> Vec<String> {
+    Vec::new()
 }
 
 #[cfg(target_os = "windows")]
@@ -260,7 +278,7 @@ fn platform_operation(operation: RuntimeOperation, _args: &[String]) -> RuntimeO
 
 #[cfg(target_os = "windows")]
 fn platform_verify() -> RuntimeVerifyResult {
-    verify_result(run_wsl(&fixed_args(WSL_VERIFY_ARGS)).outcome)
+    verify_result(run_wsl(&fixed_args(wsl_verify_args(active_slot()))).outcome)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -275,10 +293,11 @@ fn platform_verify() -> RuntimeVerifyResult {
 /// diagnosis the failure produces stays correct.
 #[cfg(target_os = "windows")]
 fn platform_repair() -> RuntimeOperationResult {
-    let _ = run_wsl(&fixed_args(WSL_REPAIR_RESET_ARGS));
+    let slot = active_slot();
+    let _ = run_wsl(&fixed_args(wsl_repair_reset_args(slot)));
     operation_result(
         RuntimeOperation::Repair,
-        run_wsl(&fixed_args(WSL_REPAIR_RESTART_ARGS)).outcome,
+        run_wsl(&fixed_args(wsl_repair_restart_args(slot))).outcome,
     )
 }
 
@@ -457,7 +476,7 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
         ProvisioningStep::DownloadRootfs,
         "Downloading rootfs tarball",
     );
-    let tarball_path = match download_rootfs(&manifest, &bundle) {
+    let tarball_path = match download_rootfs(&bundle) {
         Ok(p) => p,
         Err(e) => {
             return RuntimeOperationResult {
@@ -511,7 +530,7 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
         "Writing wsl.conf to enable systemd",
     );
     let write_conf_result = run_wsl_stdin(
-        &wsl_write_conf_args(target_slot),
+        &fixed_args(wsl_write_conf_args(target_slot)),
         WSL_CONF_CONTENTS.as_bytes(),
     );
     if !matches!(write_conf_result.outcome, CommandOutcome::Success) {
@@ -524,7 +543,7 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
         ProvisioningStep::RestartWsl,
         "Terminating distro to boot with systemd",
     );
-    let terminate_result = run_wsl(&wsl_terminate_args(target_slot));
+    let terminate_result = run_wsl(&fixed_args(wsl_terminate_args(target_slot)));
     if !matches!(terminate_result.outcome, CommandOutcome::Success) {
         return operation_result(RuntimeOperation::Provision, terminate_result.outcome);
     }
@@ -540,7 +559,11 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
         sequence: manifest.release_sequence,
         rollback_floor: new_floor,
     };
-    if let Err(e) = persist_installed_release(&new_installed) {
+    // Provisioning still imports into the primary slot, so that is the slot
+    // this install leaves serving. Staging into the inactive slot is the next
+    // change; recording the slot now is what lets the lifecycle commands
+    // follow it when it starts to move.
+    if let Err(e) = persist_installed_release(&new_installed, DistroSlot::INITIAL) {
         return RuntimeOperationResult {
             operation: RuntimeOperation::Provision,
             state: OperationState::Failed,
@@ -613,17 +636,77 @@ fn fetch_manifest_and_signature() -> Result<(Vec<u8>, Vec<u8>), String> {
     Ok((manifest_bytes, signature_bytes))
 }
 
+/// The broker's own on-disk schema.
+///
+/// Deliberately not `InstalledRelease` itself: that type is what
+/// `decide_update` reasons about, and the slot is not part of a release's
+/// identity. What is installed and where it is installed are separate facts,
+/// and only the second one is a property of this machine. Keeping the schema
+/// here also means the file format is versioned next to the code that reads
+/// and writes it, rather than riding on a core type that has no stake in it.
 #[cfg(target_os = "windows")]
-fn load_installed_release() -> Option<InstalledRelease> {
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedState {
+    sequence: u64,
+    rollback_floor: u64,
+    /// Absent from state files written before slots existed. Such a file
+    /// describes an install that went into the primary slot, which is what
+    /// `INITIAL` is, so defaulting reads it faithfully rather than guessing.
+    /// Rejecting it instead would make `load_installed_release` return `None`,
+    /// and a `None` here silently drops the recorded rollback floor — the
+    /// anti-rollback guarantee would be lost on the next provision.
+    #[serde(default = "initial_slot")]
+    active_slot: DistroSlot,
+}
+
+#[cfg(target_os = "windows")]
+fn initial_slot() -> DistroSlot {
+    DistroSlot::INITIAL
+}
+
+#[cfg(target_os = "windows")]
+fn load_persisted_state() -> Option<PersistedState> {
     let path = installed_state_path();
     let data = fs::read(&path).ok()?;
     serde_json::from_slice(&data).ok()
 }
 
 #[cfg(target_os = "windows")]
-fn persist_installed_release(installed: &InstalledRelease) -> Result<(), String> {
+fn load_installed_release() -> Option<InstalledRelease> {
+    load_persisted_state().map(|state| InstalledRelease {
+        sequence: state.sequence,
+        rollback_floor: state.rollback_floor,
+    })
+}
+
+/// The slot every lifecycle command is aimed at.
+///
+/// An unreadable or absent state file answers `INITIAL` rather than failing:
+/// before the first provision there is no file, and the primary slot is where
+/// a first install lands, so that is the only slot a command could be talking
+/// about.
+#[cfg(target_os = "windows")]
+fn active_slot() -> DistroSlot {
+    load_persisted_state().map_or(DistroSlot::INITIAL, |state| state.active_slot)
+}
+
+#[cfg(target_os = "windows")]
+fn persist_installed_release(
+    installed: &InstalledRelease,
+    active_slot: DistroSlot,
+) -> Result<(), String> {
     let path = installed_state_path();
-    let json = serde_json::to_vec(installed).map_err(|e| e.to_string())?;
+    // A first install writes into a directory no one has created yet.
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_vec(&PersistedState {
+        sequence: installed.sequence,
+        rollback_floor: installed.rollback_floor,
+        active_slot,
+    })
+    .map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| e.to_string())
 }
 
@@ -643,7 +726,7 @@ fn compute_install_dir() -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn download_rootfs(manifest: &ReleaseManifest, bundle: &RuntimeBundle) -> Result<String, String> {
+fn download_rootfs(bundle: &RuntimeBundle) -> Result<String, String> {
     let download_dir = download_dir_path();
     fs::create_dir_all(&download_dir).map_err(|e| e.to_string())?;
 
@@ -657,7 +740,7 @@ fn download_rootfs(manifest: &ReleaseManifest, bundle: &RuntimeBundle) -> Result
 
     let tarball_path = download_dir.join("rootfs.tar.gz");
     let client = reqwest::blocking::Client::new();
-    let mut resp = client
+    let resp = client
         .get(&tarball_url)
         .send()
         .map_err(|e| format!("rootfs GET failed: {e}"))?;
@@ -671,7 +754,12 @@ fn download_rootfs(manifest: &ReleaseManifest, bundle: &RuntimeBundle) -> Result
         .map_err(|e| format!("rootfs read failed: {e}"))?;
     file.write_all(&bytes).map_err(|e| e.to_string())?;
 
-    // Verify SHA256 of downloaded tarball against compose_sha256
+    // NOT a rootfs integrity check. `compose_sha256` is the digest of the
+    // compose file, and the manifest schema carries no digest for the rootfs
+    // tarball at all, so nothing here ties these bytes to anything the
+    // release key signed. It is left in place because removing it would make
+    // the gap invisible; closing it needs a `rootfs_sha256` field in the
+    // signed manifest, which is a schema change, not a change here.
     let computed = sha256_hex(&tarball_path)?;
     if computed != bundle.compose_sha256() {
         let _ = fs::remove_file(&tarball_path);
@@ -895,7 +983,7 @@ pub fn runtime_repair() -> RuntimeOperationResult {
 
 #[cfg(target_os = "windows")]
 fn platform_logs(lines: Option<u16>) -> RuntimeLogsResult {
-    let args = runtime_log_args(lines);
+    let args = runtime_log_args(active_slot(), lines);
     let capture = run_wsl(&args);
 
     if capture.outcome == CommandOutcome::Success {

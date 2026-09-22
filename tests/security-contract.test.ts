@@ -135,8 +135,12 @@ test('verify is a read-only exit-code probe and repair is bounded to one unit', 
   expect(core).toContain('pub fn classify_unit_probe(outcome: CommandOutcome)')
   expect(core).toContain('pub const UNPROBED_COMPONENTS: [&str; 5]')
   // Repair resets a latched failure and restarts the unit, nothing more.
-  expect(broker).toContain('WSL_REPAIR_RESET_ARGS')
-  expect(broker).toContain('WSL_REPAIR_RESTART_ARGS')
+  expect(broker).toContain('wsl_repair_reset_args(slot)')
+  expect(broker).toContain('wsl_repair_restart_args(slot)')
+  // Both spawns are aimed at the same slot, read once. Resolving the slot
+  // twice would let a swap land between them and restart a unit in a distro
+  // the reset never touched.
+  expect(broker).toContain('let slot = active_slot();')
   expect(core).toContain('"reset-failed"')
   expect(core).toContain('"restart"')
 })
