@@ -1,6 +1,8 @@
 import { render, screen } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
+import userEvent, { type UserEvent } from '@testing-library/user-event'
+import { Provider as TooltipProvider } from '@radix-ui/react-tooltip'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { SidebarFoldedContext } from '@opal/layouts/sidebar/context'
 import ThemeControl from '../shell/ThemeControl'
 import { ThemeProvider, useTheme } from './ThemeProvider'
 import { LIGHT_CLASS, SYSTEM_LIGHT_QUERY, THEME_STORAGE_KEY } from './theme'
@@ -48,6 +50,29 @@ function installMatchMedia(initiallyLight: boolean) {
 
 const isLight = () => document.documentElement.classList.contains(LIGHT_CLASS)
 
+/** The closed control: the one node that states which theme is in force. */
+const trigger = () => screen.getByRole('combobox')
+
+/**
+ * Opens the list from the keyboard, then picks a row by its label.
+ *
+ * The keyboard is not a stylistic choice. Opening the list with a pointer
+ * leaves something behind that survives unmount, and the *next* test in this
+ * file then clicks the trigger and gets nothing: measured as three options on
+ * the first open and zero on the second, with no error raised either time.
+ * Enter on a focused trigger opens it as many times as it is asked to, and it
+ * exercises the one interaction a listbox must support anyway.
+ *
+ * The label is matched as a prefix rather than exactly, because a row is not
+ * one string: Radix keeps its own copy of the label for typeahead, and Opal
+ * gives every row a description underneath.
+ */
+async function choose(user: UserEvent, label: string) {
+  trigger().focus()
+  await user.keyboard('{Enter}')
+  await user.click(await screen.findByRole('option', { name: new RegExp('^' + label) }))
+}
+
 beforeEach(() => {
   localStorage.clear()
   document.documentElement.classList.remove(LIGHT_CLASS)
@@ -66,7 +91,7 @@ describe('ThemeProvider', () => {
       </ThemeProvider>,
     )
 
-    expect(screen.getByRole('radio', { name: 'Auto' })).toBeChecked()
+    expect(trigger()).toHaveTextContent('Auto')
     expect(isLight()).toBe(true)
   })
 
@@ -79,7 +104,7 @@ describe('ThemeProvider', () => {
       </ThemeProvider>,
     )
 
-    expect(screen.getByRole('radio', { name: 'Dark' })).toBeChecked()
+    expect(trigger()).toHaveTextContent('Dark')
     expect(isLight()).toBe(false)
   })
 
@@ -92,10 +117,12 @@ describe('ThemeProvider', () => {
       </ThemeProvider>,
     )
 
-    await user.click(screen.getByRole('radio', { name: 'Light' }))
+    await choose(user, 'Light')
 
     expect(isLight()).toBe(true)
     expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('light')
+    // The trigger reports the choice back, rather than only having applied it.
+    expect(trigger()).toHaveTextContent('Light')
   })
 
   it('follows the system while it changes, rather than reading it once at boot', async () => {
@@ -125,14 +152,14 @@ describe('ThemeProvider', () => {
       </ThemeProvider>,
     )
 
-    await user.click(screen.getByRole('radio', { name: 'Dark' }))
+    await choose(user, 'Dark')
     media.set(true)
 
     // The listener stays subscribed — going back to Auto has to work without a
     // remount — but its answer no longer reaches the document.
     await vi.waitFor(() => expect(isLight()).toBe(false))
 
-    await user.click(screen.getByRole('radio', { name: 'Auto' }))
+    await choose(user, 'Auto')
     await vi.waitFor(() => expect(isLight()).toBe(true))
   })
 
@@ -169,8 +196,8 @@ describe('ThemeProvider', () => {
         </ThemeProvider>,
       )
 
-      expect(screen.getByRole('radio', { name: 'Auto' })).toBeChecked()
-      await user.click(screen.getByRole('radio', { name: 'Light' }))
+      expect(trigger()).toHaveTextContent('Auto')
+      await choose(user, 'Light')
       expect(isLight()).toBe(true)
     } finally {
       if (original === undefined) delete (globalThis as { localStorage?: unknown }).localStorage
@@ -204,7 +231,7 @@ describe('useTheme', () => {
 })
 
 describe('ThemeControl', () => {
-  it('is one labelled group of radios, not three separate controls', () => {
+  it('announces both its subject and its current value', () => {
     installMatchMedia(false)
     render(
       <ThemeProvider>
@@ -212,13 +239,99 @@ describe('ThemeControl', () => {
       </ThemeProvider>,
     )
 
-    const group = screen.getByRole('group', { name: 'Theme' })
-    const radios = screen.getAllByRole('radio')
-    expect(radios).toHaveLength(3)
-    // One `name` across the three: the browser's own roving focus depends on
-    // it, and so does only ever having one of them checked.
-    const names = new Set(radios.map((radio) => (radio as HTMLInputElement).name))
-    expect(names.size).toBe(1)
-    for (const radio of radios) expect(group).toContainElement(radio)
+    // Subject and value, split the way a labelled native select splits them:
+    // the name says what the control is for, the content says where it stands.
+    // An `aria-label` would replace that content, and the value would stop
+    // being announced at all — which is the failure this asserts against.
+    expect(trigger()).toHaveAccessibleName('Theme')
+    expect(trigger()).toHaveTextContent('Auto')
+  })
+
+  it('offers the three preferences and nothing else', async () => {
+    installMatchMedia(false)
+    const user = userEvent.setup()
+    render(
+      <ThemeProvider>
+        <ThemeControl />
+      </ThemeProvider>,
+    )
+
+    trigger().focus()
+    await user.keyboard('{Enter}')
+
+    const options = await screen.findAllByRole('option')
+    expect(options.map((option) => option.textContent)).toEqual([
+      'DarkDarkAlways dark',
+      'LightLightAlways light',
+      'AutoAutoFollow the system',
+    ])
+    // Exactly one is current, and it is the one the trigger shows.
+    const selected = options.filter((option) => option.getAttribute('aria-selected') === 'true')
+    expect(selected).toHaveLength(1)
+    expect(selected[0].textContent).toContain('Auto')
+  })
+})
+
+describe('ThemeControl, folded', () => {
+  /**
+   * The real context, not a stand-in.
+   *
+   * `SidebarRoot` is what installs it in the application, but mounting the
+   * whole sidebar here would test the layout rather than this control, and
+   * `effectiveFolded` there is a function of viewport width — which jsdom
+   * reports as a fixed 1024 and cannot be folded by. Rendering the provider
+   * directly asserts against the same value the component reads in the app.
+   */
+  function renderFolded() {
+    installMatchMedia(false)
+    return render(
+      <ThemeProvider>
+        <TooltipProvider>
+          <SidebarFoldedContext.Provider value={true}>
+            <ThemeControl />
+          </SidebarFoldedContext.Provider>
+        </TooltipProvider>
+      </ThemeProvider>,
+    )
+  }
+
+  it('replaces the select with a control rather than removing it', () => {
+    renderFolded()
+
+    // The defect this guards against is the rail offering no way to change
+    // the theme at all, which is what returning null used to do.
+    expect(screen.queryByRole('combobox')).toBeNull()
+    expect(screen.getByRole('button')).toBeInTheDocument()
+  })
+
+  it('says where it stands and what pressing it will do', () => {
+    renderFolded()
+
+    // A control with no text has one line to carry both, or the user is
+    // guessing at every press.
+    expect(screen.getByRole('button')).toHaveAccessibleName(
+      'Theme: Auto — switch to Dark',
+    )
+  })
+
+  it('advances through all three preferences and back', async () => {
+    const user = userEvent.setup()
+    renderFolded()
+    const button = () => screen.getByRole('button')
+
+    await user.click(button())
+    expect(button()).toHaveAccessibleName('Theme: Dark — switch to Light')
+    expect(isLight()).toBe(false)
+
+    await user.click(button())
+    expect(button()).toHaveAccessibleName('Theme: Light — switch to Auto')
+    expect(isLight()).toBe(true)
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('light')
+
+    // Three presses from Auto returns to Auto: the cycle closes, so nothing
+    // chosen here is a one-way door.
+    await user.click(button())
+    expect(button()).toHaveAccessibleName('Theme: Auto — switch to Dark')
+    expect(isLight()).toBe(false)
   })
 })

@@ -38,3 +38,17 @@ if (!('matchMedia' in globalThis)) {
     dispatchEvent: () => false,
   })) as unknown as typeof matchMedia
 }
+
+/**
+ * Radix's Select scrolls the highlighted option into view as the list opens.
+ * jsdom has no layout and therefore no `scrollIntoView`, so without this the
+ * menu throws before it can be read from — a failure in the test environment
+ * that looks exactly like a broken control.
+ *
+ * Same boundary as the stubs above: the scroll moves nothing, so a test may
+ * open the list and assert on what it contains, never on where it sits.
+ */
+
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {}
+}

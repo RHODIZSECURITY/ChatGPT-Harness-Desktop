@@ -1,0 +1,38 @@
+/**
+ * Structural overrides this application makes to the vendored sidebar.
+ *
+ * Separate file and not an edit, for the same reason `brand.css` is: the Opal
+ * tree is covered by a digest in PROVENANCE.md, and a checksum over files that
+ * get edited attests to nothing.
+ *
+ * Unlike `brand.css`, this one cannot win on source order. Opal's layout rules
+ * are not reached through `root.css` — every component imports its own
+ * stylesheet (`layouts/sidebar/components.tsx:3`), so they enter the bundle
+ * through the module graph and land *after* everything `index.css` imports.
+ * Each selector below therefore repeats the `data-folded` attribute to buy one
+ * level of specificity over the rule it replaces, and the repetition is load
+ * bearing: drop it and these silently stop applying.
+ */
+
+/* Opal folds the sidebar down to the logo alone — `styles.css:161` hides the
+ * body outright. That is the right call for the sidebar onyx built it for,
+ * whose body is a list of chat titles: a column of text with no icons cannot
+ * become a 3.25rem rail.
+ *
+ * Ours is a navigation list, and `SidebarTab` already knows how to be folded.
+ * It drops its label, centres its icon and moves its name into a tooltip on
+ * the right, all from the same `data-folded` attribute — machinery that hiding
+ * the body throws away in exchange for an empty strip. A fold that costs the
+ * user their navigation is a fold they will not use twice, so the body stays
+ * and the tabs become the rail.
+ */
+.opal-sidebar-root__inner[data-folded='true'][data-folded] .opal-sidebar-body__content {
+  display: flex;
+}
+
+/* The section caption goes the other way. "Projects and sessions" is text with
+ * no icon to collapse to, and at rail width it would wrap into a stack of
+ * broken words. */
+.opal-sidebar-root__inner[data-folded='true'][data-folded] .opal-sidebar-section__header {
+  display: none;
+}

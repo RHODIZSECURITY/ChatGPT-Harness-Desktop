@@ -10,6 +10,12 @@
  * `:root` / `.light` declarations at the same specificity as the generated
  * tokens, so source order is what decides which one wins. */
 @import "./design/brand.css";
+/* What the shell changes about the vendored sidebar's *layout*. Not the same
+ * mechanism: Opal's layout rules arrive through the module graph rather than
+ * root.css, so they land after this file no matter where the import sits and
+ * source order cannot decide it. Each rule in there wins on specificity, and
+ * says so. */
+@import "./design/shell.css";
 
 /* Tailwind 4 scans imported sources for class names; the vendored library is
  * outside src/ as far as its default heuristic is concerned. */

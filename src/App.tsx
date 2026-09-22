@@ -1,11 +1,17 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Provider as TooltipProvider } from '@radix-ui/react-tooltip'
-import { LineItemButton, Text } from '@opal/components'
-import { SvgCheckSquare, SvgCode, SvgFiles, SvgTerminal } from '@opal/icons'
+import { Button, LineItemButton, Text } from '@opal/components'
+import { SvgCheckSquare, SvgCode, SvgColumn, SvgFiles, SvgTerminal } from '@opal/icons'
 import { RootLayout, SidebarStateProvider } from '@opal/layouts'
 import { RouterProvider } from './design/next-shim/navigation'
 import Conversation from './shell/Conversation'
 import HarnessSidebar from './shell/HarnessSidebar'
+import {
+  readPanelFlag,
+  SIDEBAR_FOLDED_KEY,
+  WORKSPACE_OPEN_KEY,
+  writePanelFlag,
+} from './shell/panelState'
 import { ThemeProvider } from './theme/ThemeProvider'
 import { getRuntimeStatus } from './runtime/bridge'
 import type { ComponentState, RuntimeStatus } from './runtime/types'
@@ -37,13 +43,31 @@ const WORKSPACE = [
   { title: 'Tests', icon: SvgCheckSquare },
 ]
 
+/// The panel's open width. Kept here rather than in a class because the
+/// closed state is `0` and Tailwind cannot transition between two utilities —
+/// one property, animated, with both ends written in the same place.
+const WORKSPACE_WIDTH = '15.5rem'
+
 function Shell() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Read once, lazily: the first render must already be the right width, or
+  // the panel animates itself shut on every launch.
+  const [workspaceOpen, setWorkspaceOpen] = useState(() =>
+    readPanelFlag(WORKSPACE_OPEN_KEY, true)
+  )
 
   useEffect(() => {
     getRuntimeStatus().then(setStatus).catch(() => setError('Broker unavailable'))
   }, [])
+
+  const toggleWorkspace = useCallback(() => {
+    setWorkspaceOpen((open) => {
+      writePanelFlag(WORKSPACE_OPEN_KEY, !open)
+      return !open
+    })
+  }, [])
+  const workspaceLabel = workspaceOpen ? 'Hide workspace panel' : 'Show workspace panel'
 
   return (
     <RootLayout.Root>
@@ -65,10 +89,23 @@ function Shell() {
                 bar already states where runtime authority lives, and states it
                 from the broker rather than from a sentence that cannot be
                 wrong. */}
-            <header className="flex shrink-0 items-center border-b border-border-01 px-10 py-3">
+            <header className="flex shrink-0 items-center justify-between gap-4 border-b border-border-01 px-10 py-3">
               <Text as="h1" font="main-ui-body" color="text-04">
                 Harness workspace
               </Text>
+              {/* The panel's control sits in the transcript's own strip, not
+                  inside the panel: a button that disappears with the thing it
+                  reopens is a one-way door. Mirrors where the sidebar keeps
+                  its fold button, at the other end of the same row. */}
+              <Button
+                icon={SvgColumn}
+                prominence="tertiary"
+                size="md"
+                aria-label={workspaceLabel}
+                tooltip={workspaceLabel}
+                tooltipSide="bottom"
+                onClick={toggleWorkspace}
+              />
             </header>
             <div className="min-h-0 flex-1">
               <Conversation core={status?.core.state ?? 'checking'} />
@@ -109,27 +146,40 @@ function Shell() {
       </RootLayout.App>
 
       <RootLayout.RightPanel>
+        {/* RootLayout's panel slot is `shrink-0` and takes its width from this
+            child, so the width transition has to live here rather than on the
+            slot. The content stays mounted: `display: none` cannot be
+            animated, and unmounting would discard the panel's scroll position
+            every time it is closed. `inert` is what takes the hidden content
+            out of the tab order and the accessibility tree — `overflow-hidden`
+            only stops it being seen. */}
         <div
-          aria-label="Workspace details"
-          className="h-full w-62 border-l border-border-01 px-3 py-6"
+          className="h-full overflow-hidden transition-[width] duration-200 ease-in-out motion-reduce:transition-none"
+          style={{ width: workspaceOpen ? WORKSPACE_WIDTH : '0rem' }}
+          inert={!workspaceOpen}
         >
-          <div className="px-2 pb-2">
-            <Text font="figure-small-label" color="text-03">
-              Workspace
-            </Text>
+          <div
+            aria-label="Workspace details"
+            className="h-full w-62 border-l border-border-01 px-3 py-6"
+          >
+            <div className="px-2 pb-2">
+              <Text font="figure-small-label" color="text-03">
+                Workspace
+              </Text>
+            </div>
+            {WORKSPACE.map(({ title, icon }) => (
+              <LineItemButton
+                key={title}
+                title={title}
+                icon={icon}
+                // The default preset is "headline", sized for a full-width list.
+                // In a 248px panel it renders the icon at headline scale and the
+                // row wraps, stacking the glyph above its own label.
+                sizePreset="main-ui"
+                disabled
+              />
+            ))}
           </div>
-          {WORKSPACE.map(({ title, icon }) => (
-            <LineItemButton
-              key={title}
-              title={title}
-              icon={icon}
-              // The default preset is "headline", sized for a full-width list.
-              // In a 248px panel it renders the icon at headline scale and the
-              // row wraps, stacking the glyph above its own label.
-              sizePreset="main-ui"
-              disabled
-            />
-          ))}
         </div>
       </RootLayout.RightPanel>
     </RootLayout.Root>
@@ -137,6 +187,14 @@ function Shell() {
 }
 
 export default function App() {
+  // The sidebar's fold state belongs to Opal's provider, which owns the
+  // Cmd/Ctrl+E shortcut as well as the button. It offers exactly these two
+  // hooks for persistence, so the shell supplies storage and nothing else.
+  const [sidebarFolded] = useState(() => readPanelFlag(SIDEBAR_FOLDED_KEY, false))
+  const persistSidebar = useCallback((folded: boolean) => {
+    writePanelFlag(SIDEBAR_FOLDED_KEY, folded)
+  }, [])
+
   return (
     // Opal's Tooltip is Radix's, used directly and without a Provider of its
     // own, so mounting one is the consuming application's job — onyx does the
@@ -148,7 +206,10 @@ export default function App() {
     <ThemeProvider>
       <TooltipProvider delayDuration={400}>
         <RouterProvider>
-          <SidebarStateProvider>
+          <SidebarStateProvider
+            defaultFolded={sidebarFolded}
+            onFoldedChange={persistSidebar}
+          >
             <Shell />
           </SidebarStateProvider>
         </RouterProvider>

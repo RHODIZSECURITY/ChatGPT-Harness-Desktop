@@ -1,67 +1,135 @@
 import { useId } from 'react'
+import { Button, InputSingleSelect, Text } from '@opal/components'
+import { SvgMoon, SvgSun } from '@opal/icons'
+import { useSidebarFolded } from '@opal/layouts'
+import type { IconFunctionComponent } from '@opal/types'
 import { useTheme } from '../theme/ThemeProvider'
-import { THEME_PREFERENCES, type ThemePreference } from '../theme/theme'
+import { isThemePreference, THEME_PREFERENCES, type ThemePreference } from '../theme/theme'
+import SvgThemeAuto from './SvgThemeAuto'
 
-/**
- * Labels are keyed off the preference tuple rather than listed beside it, so a
- * fourth preference cannot be added without the compiler asking for its word.
- */
 const LABELS: Record<ThemePreference, string> = {
   dark: 'Dark',
   light: 'Light',
   system: 'Auto',
 }
 
+/// "Auto" is the only one of the three that does not describe what you will
+/// see, so every option carries a line rather than singling that one out with
+/// an explanation the others lack.
+const DESCRIPTIONS: Record<ThemePreference, string> = {
+  dark: 'Always dark',
+  light: 'Always light',
+  system: 'Follow the system',
+}
+
+/// The icon shows the *preference*, not the resolved theme. Resolved would be
+/// the wrong thing to draw: the window itself is already the largest possible
+/// statement of which side is in force, and an icon that repeats it makes Auto
+/// indistinguishable from whichever side it happens to have landed on.
+const ICONS: Record<ThemePreference, IconFunctionComponent> = {
+  dark: SvgMoon,
+  light: SvgSun,
+  system: SvgThemeAuto,
+}
+
+function nextPreference(current: ThemePreference): ThemePreference {
+  const index = THEME_PREFERENCES.indexOf(current)
+  return THEME_PREFERENCES[(index + 1) % THEME_PREFERENCES.length]
+}
+
 /**
- * The theme picker.
+ * The expanded control: a labelled select.
  *
- * Native radios, visually hidden behind their labels, rather than three
- * buttons carrying `role="radio"`. A hand-written radiogroup owes the user
- * roving tabindex and arrow-key movement between options, and a control that
- * looks grouped but tabs through three separate stops is the kind of detail
- * that is invisible until it is wrong. The browser already does it.
+ * Opal's select, not the platform's: a native `<select>` draws its popup with
+ * operating-system chrome, which is the one surface in this window that no
+ * token can reach and that therefore looks bolted on in both themes.
  *
- * Words, not glyphs. The icon set has a sun and a moon but nothing that means
- * "follow the operating system" — the usual half-filled circle is not in it —
- * and a circle or a lightbulb pressed into that role would teach the wrong
- * thing. Three words are unambiguous, and they stay legible at any width.
+ * Name and value are kept apart, the way a native `<select>` with a `<label>`
+ * keeps them: the visible "Theme" caption is the name, referenced through
+ * `aria-labelledby`, and the current preference is the trigger's own content.
+ * An `aria-label` would *replace* that content, so the control would read as
+ * "Theme" whether it said Dark or Light — a label that hides the state it
+ * labels.
  */
-export default function ThemeControl() {
+function ThemeSelect() {
   const { preference, setPreference } = useTheme()
-  const name = useId()
+  const id = useId()
+  const labelId = `${id}-label`
 
   return (
-    <fieldset
-      className="flex gap-0.5 rounded-08 border border-border-01 bg-background-tint-01 p-0.5"
-    >
-      <legend className="sr-only">Theme</legend>
-      {THEME_PREFERENCES.map((option) => (
-        <div key={option} className="flex-1">
-          <input
-            type="radio"
-            id={`${name}-${option}`}
-            name={name}
-            value={option}
-            checked={preference === option}
-            onChange={() => setPreference(option)}
-            className="peer sr-only"
-          />
-          <label
-            htmlFor={`${name}-${option}`}
-            className={
-              'block cursor-pointer rounded-04 px-2 py-1 text-center font-secondary-action ' +
-              'text-text-03 transition-colors hover:text-text-04 ' +
-              'peer-checked:bg-background-tint-03 peer-checked:text-text-05 ' +
-              // The input is hidden, so its focus ring has to be borrowed. Without
-              // this the control is keyboard-operable and gives no sign of it.
-              'peer-focus-visible:outline peer-focus-visible:outline-2 ' +
-              'peer-focus-visible:outline-offset-1 peer-focus-visible:outline-border-03'
-            }
-          >
-            {LABELS[option]}
-          </label>
-        </div>
-      ))}
-    </fieldset>
+    <div className="flex flex-col gap-1.5">
+      <Text id={labelId} font="figure-small-label" color="text-03">
+        Theme
+      </Text>
+      <InputSingleSelect
+        value={preference}
+        onValueChange={(next) => {
+          // The select is typed as a plain string. Narrowing here keeps the
+          // preference model the only place that says what a theme can be.
+          if (isThemePreference(next)) setPreference(next)
+        }}
+      >
+        <InputSingleSelect.Trigger aria-labelledby={labelId} />
+        <InputSingleSelect.Content>
+          {THEME_PREFERENCES.map((option) => (
+            <InputSingleSelect.Item
+              key={option}
+              value={option}
+              description={DESCRIPTIONS[option]}
+            >
+              {LABELS[option]}
+            </InputSingleSelect.Item>
+          ))}
+        </InputSingleSelect.Content>
+      </InputSingleSelect>
+    </div>
   )
+}
+
+/**
+ * The folded control: one icon that advances through the same three values.
+ *
+ * A 3.25rem rail cannot hold a select — the trigger is a bordered input box
+ * with a chevron, and Opal's is `WithoutStyles`, so it cannot be talked down
+ * to icon size. Hiding the control instead, which is what this file used to
+ * do, costs the user the theme entirely for as long as the sidebar is folded.
+ * Cycling is what a rail can afford, and it is reversible in two clicks.
+ *
+ * Name and value stay split here too, but in the only way a control with no
+ * text can manage it: the label states the subject, the current value and the
+ * next one, so pressing it is never a guess. Same `setPreference` as the
+ * select, so there is one writer and no state to keep in step.
+ */
+function ThemeCycle() {
+  const { preference, setPreference } = useTheme()
+  const next = nextPreference(preference)
+  const label = `Theme: ${LABELS[preference]} — switch to ${LABELS[next]}`
+
+  return (
+    <div className="flex justify-center">
+      <Button
+        icon={ICONS[preference]}
+        prominence="tertiary"
+        size="md"
+        aria-label={label}
+        tooltip={label}
+        // The rail is against the window's left edge; anywhere else and the
+        // tooltip opens over the sidebar it belongs to.
+        tooltipSide="right"
+        onClick={() => setPreference(next)}
+      />
+    </div>
+  )
+}
+
+/**
+ * The window's theme, in whichever form the sidebar currently has room for.
+ *
+ * Opal hides the sidebar *body* when folded but leaves the footer visible, so
+ * what a footer does at rail width is this component's problem and not the
+ * layout's. Two components rather than one branch: `useTheme` is called on
+ * both paths, and a hook behind a condition is a hook that changes order.
+ */
+export default function ThemeControl() {
+  return useSidebarFolded() ? <ThemeCycle /> : <ThemeSelect />
 }

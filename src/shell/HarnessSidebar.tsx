@@ -1,6 +1,6 @@
-import { SidebarTab } from '@opal/components'
+import { SidebarTab, Text } from '@opal/components'
 import { SvgFolder, SvgPlayCircle } from '@opal/icons'
-import { SidebarLayouts } from '@opal/layouts'
+import { SidebarLayouts, useSidebarFolded } from '@opal/layouts'
 import RhodizMark from './RhodizMark'
 import ThemeControl from './ThemeControl'
 
@@ -13,11 +13,37 @@ const PLANNED = [
   { label: 'Sessions', icon: SvgPlayCircle },
 ]
 
+/**
+ * The product name under the logo.
+ *
+ * A component rather than inline markup, because `useSidebarFolded` reads the
+ * context `SidebarRoot` installs — a hook called in `HarnessSidebar` itself
+ * sits outside that provider and would always report `false`.
+ *
+ * Opal hides the sidebar *body* when folded but leaves the header's content
+ * slot and the footer alone, so anything wider than the 3.25rem rail has to
+ * remove itself. This used to be a permanently disabled `SidebarTab`, which
+ * folded into an empty row: a tab collapses to its icon, and a product name
+ * has none.
+ */
+function Wordmark() {
+  const folded = useSidebarFolded()
+  if (folded) return null
+  return (
+    <Text font="main-ui-action" color="text-04" wordWrap="whitespace-nowrap">
+      RHODIZ Harness
+    </Text>
+  )
+}
+
 export default function HarnessSidebar() {
   return (
-    <SidebarLayouts.Root>
+    // `foldable` is what turns on the fold button, the Cmd/Ctrl+E shortcut and
+    // the width transition. Opal defaults it off, so without this the sidebar
+    // collapses on a narrow window and nowhere else.
+    <SidebarLayouts.Root foldable>
       <SidebarLayouts.Header renderAppLogo={() => RhodizMark} showLogoWhenFolded>
-        <SidebarTab disabled>RHODIZ Harness</SidebarTab>
+        <Wordmark />
       </SidebarLayouts.Header>
 
       <SidebarLayouts.Body scrollKey="harness-sidebar">
