@@ -1,6 +1,10 @@
 @import "tailwindcss";
 @import "./design/tokens.css";
 @import "./design/theme.css";
+/* The `@utility font-*` presets. Opal's own root.css imports its metrics, not
+ * these: without this line every `font-heading-h2` in the app resolves to
+ * nothing and the type scale silently flattens. */
+@import "./design/typography.css";
 @import "./design/opal/root.css";
 
 /* Tailwind 4 scans imported sources for class names; the vendored library is

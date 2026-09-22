@@ -751,3 +751,22 @@ test('the vendored tree reaches no network and no persistent storage', async () 
   }
   expect(withSessionStorage).toEqual(['src/design/opal/layouts/sidebar/components.tsx'])
 })
+
+test('the generated type scale actually reaches the stylesheet', async () => {
+  // The presets are `@utility` rules in a generated file, and a generated file
+  // that nothing imports produces no error — every `font-*` class in the app
+  // just resolves to nothing and the scale silently flattens. That happened,
+  // and it was visible only in the running window.
+  const index = await read('src/index.css')
+  expect(index).toContain('@import "./design/typography.css"')
+
+  const typography = await read('src/design/typography.css')
+  const presets = [...typography.matchAll(/^@utility (font-[a-z0-9-]+) \{$/gm)].map((m) => m[1]!)
+  expect(presets.length).toBeGreaterThan(15)
+
+  // Every preset the shell names must be one the generator emits.
+  const app = await read('src/App.tsx')
+  const used = [...app.matchAll(/font="([a-z0-9-]+)"/g)].map((m) => `font-${m[1]!}`)
+  expect(used.length).toBeGreaterThan(0)
+  for (const preset of used) expect(presets, `${preset} is not a generated preset`).toContain(preset)
+})

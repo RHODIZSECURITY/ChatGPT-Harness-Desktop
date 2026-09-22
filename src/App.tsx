@@ -118,7 +118,16 @@ function Shell() {
             </Text>
           </div>
           {WORKSPACE.map(({ title, icon }) => (
-            <LineItemButton key={title} title={title} icon={icon} disabled />
+            <LineItemButton
+              key={title}
+              title={title}
+              icon={icon}
+              // The default preset is "headline", sized for a full-width list.
+              // In a 248px panel it renders the icon at headline scale and the
+              // row wraps, stacking the glyph above its own label.
+              sizePreset="main-ui"
+              disabled
+            />
           ))}
         </div>
       </RootLayout.RightPanel>
