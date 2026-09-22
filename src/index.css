@@ -6,6 +6,10 @@
  * nothing and the type scale silently flattens. */
 @import "./design/typography.css";
 @import "./design/opal/root.css";
+/* Last, and that is the whole mechanism: the accent overrides below are plain
+ * `:root` / `.light` declarations at the same specificity as the generated
+ * tokens, so source order is what decides which one wins. */
+@import "./design/brand.css";
 
 /* Tailwind 4 scans imported sources for class names; the vendored library is
  * outside src/ as far as its default heuristic is concerned. */

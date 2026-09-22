@@ -149,6 +149,114 @@ wrong major by `npm install` and corrected (`@tanstack/react-table` to ^8,
 and the tree digest, and fails if any `ee` path appears under `src/`. The
 router shim has its own suite. `npm run verify:portable` covers the rest.
 
+## Imported: the two typefaces this application renders in
+
+| field | value |
+| --- | --- |
+| Upstream | [Hanken Grotesk](https://github.com/marcologous/hanken-grotesk) v3.013, [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) v2.211 |
+| Retrieved from | Google Fonts, `css2` API with `display=swap` (family revisions v12 and v24) |
+| License | SIL Open Font License 1.1 — `src/design/fonts/OFL-HankenGrotesk.txt`, `OFL-JetBrainsMono.txt` |
+| Local destination | `src/design/fonts/` |
+| Classification | **ADOPT.** Binary assets, byte-identical to what was downloaded. |
+
+```
+e9201eddf1d41d0b62253295d869ce3cf65768f7102b797f02c7f8c876b4a9d5  HankenGrotesk-latin.woff2
+768af2923e0ab1549f1dfba0a5c8ea749c4c01f01d8e77ffaf7fcd12f57a0a24  HankenGrotesk-latin-ext.woff2
+18be452724bfdc236c074ca94a249a7f41a86752c7d04ab258ce9ed5651f6a7e  JetBrainsMono-latin.woff2
+79bfdab9ba467e26eea4122e6f2567e188dd8a09a8c730d501fc487c4ab99c6e  JetBrainsMono-latin-ext.woff2
+```
+
+Source URLs, in the same order:
+
+```
+https://fonts.gstatic.com/s/hankengrotesk/v12/ieVn2YZDLWuGJpnzaiwFXS9tYtpd59A.woff2
+https://fonts.gstatic.com/s/hankengrotesk/v12/ieVn2YZDLWuGJpnzaiwFXS9tYtpT59CjCQ.woff2
+https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbV2o-flEEny0FZhsfKu5WU4xD7OwE.woff2
+https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbV2o-flEEny0FZhsfKu5WU4xD1OwG_TA.woff2
+```
+
+**Why these are in the repository at all.** The Tauri CSP is
+`font-src 'self' data:`. A font that is not in the bundle cannot be fetched,
+and an `@font-face` pointing off the machine does not fail loudly — the shell
+just renders in whatever the operating system picks, differently on every
+machine. Self-hosting is not a preference here, it is the only thing the
+application permits.
+
+**Why variable and not static.** `src/design/typography.css` asks for weight
+450 in one preset. A static 400 file does not reject that, it snaps to 400, and
+the preset silently stops being a distinct weight. Verified with fontTools
+rather than assumed from the CDN: Hanken Grotesk carries `fvar` axis
+`wght 100–900`, JetBrains Mono `wght 100–800`, both at 1000 units per em. Every
+weight the type scale uses (400, 450, 500, 600, 700) is inside both.
+
+**Which token each one answers.** `--font-hanken-grotesk` already names
+`"Hanken Grotesk"` first, so the `@font-face` is all it needed.
+`--font-dm-mono` names `"DM Mono"`, which is not bundled and cannot be fetched,
+so `src/design/brand.css` repoints the token at JetBrains Mono; the token name
+is generated from the pinned onyx JSON and is therefore not this project's to
+rename.
+
+**KH Teka is left where it is, deliberately.** Opal declares two `@font-face`
+rules for it in `src/design/opal/styles/typography.css`, pointing at
+`/fonts/KHTeka-*.otf` — a commercial face, and files that do not exist in this
+bundle. The rules are inert: no typography preset references the family, so the
+browser never requests them. Removing the file would mean editing the bytes of
+two retained vendored files that import it (`root.css` and `_reference.css`),
+which is the one thing the tree digest above exists to prevent. What is done
+instead costs nothing pinned: `brand.css` points the `--font-kh-teka` *token*
+at the typeface this application actually ships, so a future use of the token
+renders in the product's own face rather than a system fallback.
+
+**Security review.** Fonts are parsed by the platform's own shaping stack,
+which is the same code path every page the user already opens exercises; the
+exposure is the file's integrity, and that is what the checksums above pin. The
+subsets are Google's latin and latin-ext slices — no Google script, no
+stylesheet and no runtime call to `fonts.gstatic.com` comes with them, and the
+CSP would block all three. Both licences permit redistribution and ship
+alongside the binaries; neither is a Reserved Font Name build, so no renaming
+obligation applies.
+
+**Tests.** `tests/security-contract.test.ts` pins the four checksums, that both
+licence files are present, that every `@font-face` resolves to a relative path
+inside the bundle that exists on disk, that the CSP still forbids a remote one,
+that every weight the scale asks for lies inside the bundled axes, and that
+`brand.css` is imported after the generated tokens — which is the only reason
+its overrides win.
+
+## Authored here: the accent ramp
+
+`src/design/brand.css` replaces eight of onyx's accent tokens —
+`--action-selection-00..06` and `--action-text-link-05` — in both themes. No
+upstream bytes are involved; the values are derived, and the derivation is
+recorded so it can be re-run rather than trusted.
+
+onyx's accent sits at OKLCH hue 262°. The blue in the RHODIZ mark measures
+249°. Side by side that reads as two blues rather than one, and the accent is
+the colour the eye tracks: selection, focus, links. Each step keeps its own
+OKLCH lightness and chroma and changes only hue, so the ramp's internal
+relationships stay the ones onyx designed; chroma is reduced where 249° at that
+lightness falls outside sRGB. The rotation is done in OKLCH and not HSL because
+HSL's lightness is not perceptual — a cyan-leaning blue at fixed HSL lightness
+comes out visibly brighter than the indigo it replaces, which would quietly
+change every contrast ratio in the shell.
+
+Step 05 is re-fitted rather than rotated. It is the fill behind white text and
+the link colour in the light theme, and at its original lightness the brand hue
+lands at 4.18:1 on white, below WCAG AA. Its lightness drops from 0.577 to
+0.559, which restores 4.50:1. Measured before and after:
+
+| | on | before | after |
+| --- | --- | --- | --- |
+| link, dark `#397bff` → `#0086fa` | `#000000` | 5.45 | 5.79 |
+| link, dark | `#1a1a1a` | 4.52 | 4.80 |
+| link, light `#286df8` → `#0073ec` | `#ffffff` | 4.53 | 4.50 |
+| selection-05, dark `#286df8` → `#0073ec` | `#000000` | 4.63 | 4.66 |
+| white on selection-05, dark | `#0073ec` | 4.53 | 4.50 |
+
+Nothing regresses below AA. **The neutrals are untouched** — they are onyx's
+greys, they are the reason the shell reads as calm, and repainting them would
+be redesigning the design system rather than branding it.
+
 ## Adapted, not vendored: the streaming packet protocol
 
 | field | value |

@@ -770,3 +770,101 @@ test('the generated type scale actually reaches the stylesheet', async () => {
   expect(used.length).toBeGreaterThan(0)
   for (const preset of used) expect(presets, `${preset} is not a generated preset`).toContain(preset)
 })
+
+test('the bundled typefaces are byte-identical to what PROVENANCE.md records', async () => {
+  // Same mechanism as the token checksums above, and for a stronger reason: a
+  // font is an opaque binary nobody reviews by reading it. The digest is what
+  // ties the file in this repository to the file that was downloaded from the
+  // recorded URL and inspected, and it is the only thing that would notice a
+  // swap.
+  const provenance = await read('PROVENANCE.md')
+  const recorded = [...provenance.matchAll(/^([0-9a-f]{64}) {2}([\w-]+\.woff2)$/gm)]
+  expect(recorded.length).toBe(4)
+
+  const dir = process.cwd() + '/src/design/fonts/'
+  const present = (await readdir(dir)).filter((name) => name.endsWith('.woff2')).sort()
+  expect(present).toEqual(recorded.map((m) => m[2]!).sort())
+
+  for (const [, digest, name] of recorded) {
+    const bytes = await readFile(dir + name!)
+    expect(createHash('sha256').update(bytes).digest('hex'), `${name} was replaced`).toBe(digest)
+  }
+
+  // Redistributing them is only lawful under their licences, so the licences
+  // ship beside them rather than being a line in a document.
+  const licences = (await readdir(dir)).filter((name) => name.startsWith('OFL-'))
+  expect(licences.sort()).toEqual(['OFL-HankenGrotesk.txt', 'OFL-JetBrainsMono.txt'])
+})
+
+test('no font this application declares can be fetched off the machine', async () => {
+  // The CSP is `font-src 'self' data:`, so a remote @font-face does not fail
+  // loudly — it fails as the shell rendering in whatever the operating system
+  // picks. The rule is pinned against the stylesheet rather than trusted to
+  // review.
+  const csp = JSON.parse(await read('src-tauri/tauri.conf.json')).app.security.csp
+  expect(csp).toContain("font-src 'self' data:")
+
+  const brand = await read('src/design/brand.css')
+  const urls = [...brand.matchAll(/src:\s*url\("([^"]+)"\)/g)].map((m) => m[1]!)
+  expect(urls.length).toBe(4)
+  for (const url of urls) {
+    expect(url, 'a font must resolve inside the bundle').toMatch(/^\.\/fonts\/[\w-]+\.woff2$/)
+    // Vite verifies this too, but only for a path it can see; asserting it here
+    // is what keeps a renamed file from being caught at build time in CI rather
+    // than here, next to the reason.
+    await expect(readFile(process.cwd() + '/src/design/' + url.slice(2))).resolves.toBeTruthy()
+  }
+})
+
+test('every weight the type scale asks for is one the bundled fonts can render', async () => {
+  // This is the whole reason the files are variable rather than static. One
+  // preset asks for 450; a static 400 file does not fail on that, it snaps to
+  // 400, and the preset quietly stops being a distinct weight.
+  const brand = await read('src/design/brand.css')
+  const ranges = [...brand.matchAll(/font-weight:\s*(\d+)\s+(\d+);/g)].map(
+    (m) => [Number(m[1]), Number(m[2])] as const,
+  )
+  expect(ranges.length).toBe(4)
+  const floor = Math.max(...ranges.map(([low]) => low))
+  const ceiling = Math.min(...ranges.map(([, high]) => high))
+
+  const typography = await read('src/design/typography.css')
+  const weights = [...typography.matchAll(/font-weight:\s*(\d+);/g)].map((m) => Number(m[1]))
+  expect(weights.length).toBeGreaterThan(15)
+  expect(weights).toContain(450)
+  for (const weight of new Set(weights)) {
+    expect(weight, `weight ${weight} is outside every bundled font's axis`).toBeGreaterThanOrEqual(
+      floor,
+    )
+    expect(weight, `weight ${weight} is outside every bundled font's axis`).toBeLessThanOrEqual(
+      ceiling,
+    )
+  }
+})
+
+test('the brand overrides are loaded where they can actually override', async () => {
+  // `:root` and `.light` are both specificity (0,1,0). Nothing about these
+  // declarations wins on its own — being imported after the generated tokens
+  // is the entire mechanism, and an import reordered by a tidy-up would revert
+  // the accent and the mono family with no error anywhere.
+  const index = await read('src/index.css')
+  const tokens = index.indexOf('@import "./design/tokens.css"')
+  const brand = index.indexOf('@import "./design/brand.css"')
+  expect(tokens).toBeGreaterThan(-1)
+  expect(brand).toBeGreaterThan(tokens)
+
+  const sheet = await read('src/design/brand.css')
+  // The mono token names a family the bundle does not contain, so it is
+  // corrected here; if that override is lost the code blocks fall through to a
+  // different system font on every operating system.
+  expect(sheet).toMatch(/--font-dm-mono:\s*"JetBrains Mono"/)
+  expect(await read('src/design/tokens.css')).toMatch(/--font-dm-mono:\s*"DM Mono"/)
+
+  // Both themes, or the light one keeps onyx's accent and the two disagree.
+  for (const scope of [':root', '.light']) {
+    const at = sheet.indexOf(scope + ' {\n  --action-selection-06')
+    expect(at, `${scope} carries no accent ramp`).toBeGreaterThan(-1)
+    const block = sheet.slice(at, sheet.indexOf('}', at))
+    expect([...block.matchAll(/--action-(?:selection-0\d|text-link-05):/g)].length).toBe(8)
+  }
+})
