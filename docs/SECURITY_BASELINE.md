@@ -223,6 +223,18 @@ from beside the manifest or from any file the update path can replace: an
 attacker able to swap the manifest could then swap the key that authenticates
 it, and the signature would verify perfectly against the attacker's own key.
 
+**What that means for end-to-end evidence.** The provisioning pipeline has
+twelve steps and verification is the third. With no anchor pinned, the pipeline
+cannot execute past that third step on any host, including Windows: there is no
+manifest it will accept, so nothing downloads, nothing imports, nothing is
+configured. An end-to-end run against a local update server is therefore able
+to certify exactly one thing today — that the refusal happens, and happens
+before any byte of rootfs is fetched and before `wsl.exe` is asked to import
+anything. That property is worth certifying and is pinned by a contract test
+below. The remaining nine steps are certified only by their unit and argument
+tests until a signing key exists; describing them as end-to-end verified would
+be describing a run that cannot occur.
+
 **Test evidence: 13 tests, anchored on external authority.** Two RFC 8032
 section 7.1 vectors are used, re-derived from an independent implementation —
 signing a fixture with the same library that verifies it would prove only
@@ -355,7 +367,7 @@ The five Windows warnings are upstream maintenance warnings, not known vulnerabi
 ## Local certification evidence
 
 - Oxlint: 0 warnings / 0 errors.
-- Vitest: 25/25 PASS.
+- Vitest: 27/27 PASS.
 - Executable TypeScript/React coverage: 100% statements, branches, functions and
   lines (24/24, 10/10, 14/14, 22/22). The previous checkpoint recorded 91.66%
   statements with `src/runtime/bridge.ts:68-69` uncovered — the callback
@@ -367,6 +379,17 @@ The five Windows warnings are upstream maintenance warnings, not known vulnerabi
   mid-provision can detach.
 - Production renderer build: PASS.
 - Rust broker-core: 87 unit + 2 integration = 89/89 PASS, 0 doc-tests.
+- Two contract tests pin the pipeline's order, which is where its safety lives
+  and which no type enforces. The first asserts that the twelve progress steps
+  are emitted in sequence and that every expensive or destructive effect — the
+  rootfs download, the distro import, the `wsl.conf` write, the terminate, the
+  root Docker install, the discard of the inactive slot — appears below the
+  signature check, so a prefetch or an early bundle resolution cannot be added
+  in front of it. The second derives the wire names from the Rust enum under
+  serde's rename rule and compares them to the renderer's union, because
+  nothing fails to compile when a step is added on one side only: the broker
+  would emit a step the UI cannot name, and the operator's only window into a
+  pipeline that otherwise runs silently for minutes would be wrong.
 - `cargo fmt --check`: PASS.
 - Clippy with `-D warnings`: PASS.
 - `npm run verify:portable`: PASS end to end.

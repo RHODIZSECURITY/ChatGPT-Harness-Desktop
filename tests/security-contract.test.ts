@@ -532,3 +532,112 @@ test('network reads are bounded in size and time before anything verifies them',
   const ceilingBranch = broker.slice(ceilingAt, broker.indexOf('return Err(', ceilingAt))
   expect(ceilingBranch).toContain('fs::remove_file(&tarball_path)')
 })
+
+// The provisioning pipeline's safety content is its order. Verification sits
+// between the bytes arriving and anything being done with them, so every
+// effect that costs something -- a multi-hundred-megabyte download, a distro
+// import, a package install as root -- has to sit below it. Nothing in the
+// type system says so: the guarantee is that the statements appear in that
+// sequence inside one function, which is exactly the kind of thing a later
+// edit reorders without noticing.
+test('nothing is downloaded or imported before the manifest signature verifies', async () => {
+  const broker = await read('src-tauri/src/broker.rs')
+
+  // The twelve steps run in the order the enum declares them. Emitting them
+  // out of order would not break provisioning, which is the problem: the UI
+  // would narrate a sequence the broker is not performing, and the progress
+  // events are the only window an operator has into a pipeline that
+  // otherwise runs silently for minutes.
+  const ORDER = [
+    'FetchManifest',
+    'Verify',
+    'Parse',
+    'Decide',
+    'ResolveBundle',
+    'DownloadRootfs',
+    'VerifyDigest',
+    'ImportWsl',
+    'ConfigureSystemd',
+    'RestartWsl',
+    'InstallDocker',
+    'PersistState',
+  ]
+  // The trailing comma matters: `ProvisioningStep::Verify` is a prefix of
+  // `ProvisioningStep::VerifyDigest`, and matching the prefix would silently
+  // compare a step against itself.
+  const positions = ORDER.map((step) => {
+    const at = broker.indexOf(`ProvisioningStep::${step},`)
+    expect(at, `${step} is never emitted`).toBeGreaterThan(-1)
+    return at
+  })
+  for (let i = 1; i < positions.length; i += 1) {
+    expect(positions[i]!, `${ORDER[i]} must be emitted after ${ORDER[i - 1]}`).toBeGreaterThan(
+      positions[i - 1]!,
+    )
+  }
+
+  // The verify call, not the import at the top of the file: `use ... {
+  // verify_release_manifest, ... }` sits above every line below and would
+  // make each of these comparisons trivially true.
+  const verifyAt = broker.indexOf('match verify_release_manifest(&manifest_bytes, &signature_bytes)')
+  expect(verifyAt).toBeGreaterThan(-1)
+
+  // Everything that acts on the manifest's contents happens below the
+  // verification of those contents. A prefetch added "while we verify", or a
+  // bundle resolved early to show the user a size, would put an
+  // attacker-chosen URL in front of the signature check.
+  for (const effect of [
+    'download_rootfs(&bundle)',
+    'wsl_import_args(target_slot,',
+    'wsl_write_conf_args(target_slot)',
+    'wsl_terminate_args(target_slot)',
+    'provision_docker_in_distro(target_slot)',
+    'wsl_discard_inactive_args(',
+  ]) {
+    const at = broker.indexOf(effect)
+    expect(at, `${effect} is missing`).toBeGreaterThan(-1)
+    expect(at, `${effect} must not run before the signature verifies`).toBeGreaterThan(verifyAt)
+  }
+
+  // A failed verification returns; it does not fall through with a warning.
+  // Scoped to the span between the verify and the next step so a `Failed`
+  // return belonging to some later stage cannot satisfy it.
+  const verifyBlock = broker.slice(verifyAt, broker.indexOf('ProvisioningStep::Parse,'))
+  expect(verifyBlock).toContain('state: OperationState::Failed')
+  expect(verifyBlock).toContain('release manifest verification failed')
+})
+
+// The Rust enum is the publisher and the TypeScript union is the subscriber,
+// and serde's rename rule is the only thing connecting them. Nothing fails to
+// compile when they drift: Rust emits a step the renderer's union does not
+// name, or the renderer offers a case that nothing will ever send, and the
+// progress display is wrong in a way that only shows up during a real
+// provision on a real Windows machine.
+test('the Rust provisioning steps and the renderer union name the same steps in the same order', async () => {
+  const broker = await read('src-tauri/src/broker.rs')
+  const types = await read('src/runtime/types.ts')
+
+  const enumAt = broker.indexOf('pub enum ProvisioningStep {')
+  expect(enumAt).toBeGreaterThan(-1)
+  const enumBody = broker.slice(enumAt, broker.indexOf('\n}', enumAt))
+  const declared = [...enumBody.matchAll(/^ {4}(\w+),$/gm)].map((m) => m[1]!)
+  expect(declared.length).toBeGreaterThan(0)
+
+  // The wire names are derived from the variants rather than written out a
+  // second time, so this compares the two languages instead of comparing two
+  // copies of the same hand-written list.
+  expect(broker.slice(Math.max(0, enumAt - 200), enumAt)).toContain(
+    '#[serde(rename_all = "snake_case")]',
+  )
+  const wire = declared.map((variant) =>
+    variant.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase(),
+  )
+
+  const unionAt = types.indexOf('export type ProvisioningStep =')
+  expect(unionAt).toBeGreaterThan(-1)
+  const unionEnd = types.indexOf('\n\n', unionAt)
+  expect(unionEnd).toBeGreaterThan(unionAt)
+  const union = [...types.slice(unionAt, unionEnd).matchAll(/'([a-z0-9_]+)'/g)].map((m) => m[1]!)
+
+  expect(union).toEqual(wire)
+})
