@@ -53,3 +53,24 @@ export interface RuntimeVerifyResult {
    *  mistake "not probed" for "verified healthy". */
   unprobed: string[]
 }
+
+// --- Provisioning progress events ---
+
+export type ProvisioningStep =
+  | 'fetch_manifest'
+  | 'verify'
+  | 'parse'
+  | 'decide'
+  | 'resolve_bundle'
+  | 'download_rootfs'
+  | 'verify_digest'
+  | 'import_wsl'
+  | 'configure_systemd'
+  | 'restart_wsl'
+  | 'install_docker'
+  | 'persist_state'
+
+export interface ProvisioningProgressPayload {
+  step: ProvisioningStep
+  detail: string
+}

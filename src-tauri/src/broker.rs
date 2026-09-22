@@ -18,6 +18,13 @@ use rhodiz_harness_broker_core::{
     WSL_WRITE_CONF_ARGS,
 };
 
+// `AppHandle` is referenced by both platforms (the non-Windows `platform_provision`
+// takes one and ignores it); `Emitter` is the trait that actually emits events, so
+// it belongs with the Windows implementation that does.
+use tauri::AppHandle;
+#[cfg(target_os = "windows")]
+use tauri::Emitter;
+
 // Only the non-Windows fallbacks report "unsupported"; importing it
 // unconditionally leaves a dead import on the one platform that ships.
 #[cfg(not(target_os = "windows"))]
@@ -35,6 +42,7 @@ use rhodiz_harness_broker_core::{
     lifecycle_cross_process_busy, LIFECYCLE_LOCK_DIRECTORY, LIFECYCLE_LOCK_FILE,
 };
 
+use serde::Serialize;
 use std::sync::{Mutex, TryLockError};
 
 #[cfg(target_os = "windows")]
@@ -50,6 +58,53 @@ use std::{
 };
 #[cfg(target_os = "windows")]
 use wait_timeout::ChildExt;
+
+// --- Provisioning progress events ---
+
+/// Steps in the provisioning pipeline, emitted as progress events.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvisioningStep {
+    FetchManifest,
+    Verify,
+    Parse,
+    Decide,
+    ResolveBundle,
+    DownloadRootfs,
+    VerifyDigest,
+    ImportWsl,
+    ConfigureSystemd,
+    RestartWsl,
+    InstallDocker,
+    PersistState,
+}
+
+/// Payload for a provisioning progress event.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProvisioningProgressPayload {
+    pub step: ProvisioningStep,
+    /// Human-readable detail for the UI.
+    pub detail: String,
+}
+
+/// Emits a provisioning progress event if an `AppHandle` is available.
+#[cfg(target_os = "windows")]
+fn emit_progress(app: Option<&AppHandle>, step: ProvisioningStep, detail: &str) {
+    if let Some(handle) = app {
+        let _ = handle.emit(
+            "provisioning-progress",
+            ProvisioningProgressPayload {
+                step,
+                detail: detail.to_string(),
+            },
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn emit_progress(_app: Option<&AppHandle>, _step: ProvisioningStep, _detail: &str) {
+    // No-op on non-Windows.
+}
 
 /// Keeps `wsl.exe` from flashing a console window inside a
 /// `windows_subsystem = "windows"` GUI process.
@@ -283,8 +338,13 @@ where
 }
 
 #[cfg(target_os = "windows")]
-fn platform_provision() -> RuntimeOperationResult {
+fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
     // Step 1: WSL preflight (same as before)
+    emit_progress(
+        app.as_ref(),
+        ProvisioningStep::FetchManifest,
+        "Fetching release manifest and signature",
+    );
     let status = run_wsl(&fixed_args(WSL_STATUS_ARGS)).outcome;
     let version = if matches!(status, CommandOutcome::Success) {
         read_wsl_version()
@@ -309,6 +369,11 @@ fn platform_provision() -> RuntimeOperationResult {
     };
 
     // Step 3: Verify signature
+    emit_progress(
+        app.as_ref(),
+        ProvisioningStep::Verify,
+        "Verifying manifest signature",
+    );
     let verified = match verify_release_manifest(&manifest_bytes, &signature_bytes) {
         Ok(v) => v,
         Err(e) => {
@@ -321,6 +386,11 @@ fn platform_provision() -> RuntimeOperationResult {
     };
 
     // Step 4: Parse manifest
+    emit_progress(
+        app.as_ref(),
+        ProvisioningStep::Parse,
+        "Parsing release manifest",
+    );
     let manifest: ReleaseManifest = match parse_release_manifest(verified) {
         Ok(m) => m,
         Err(e) => {
@@ -333,6 +403,11 @@ fn platform_provision() -> RuntimeOperationResult {
     };
 
     // Step 5: Load installed state and decide
+    emit_progress(
+        app.as_ref(),
+        ProvisioningStep::Decide,
+        "Deciding update action",
+    );
     let installed = load_installed_release();
     let decision = decide_update(&manifest, installed);
     let decision_clone = decision; // for match
@@ -360,6 +435,11 @@ fn platform_provision() -> RuntimeOperationResult {
     }
 
     // Step 6: Resolve runtime bundle (pinned references)
+    emit_progress(
+        app.as_ref(),
+        ProvisioningStep::ResolveBundle,
+        "Resolving runtime bundle",
+    );
     let bundle: RuntimeBundle = match resolve_runtime_bundle(&manifest) {
         Ok(b) => b,
         Err(e) => {
@@ -372,6 +452,11 @@ fn platform_provision() -> RuntimeOperationResult {
     };
 
     // Step 7: Download and verify rootfs tarball
+    emit_progress(
+        app.as_ref(),
+        ProvisioningStep::DownloadRootfs,
+        "Downloading rootfs tarball",
+    );
     let tarball_path = match download_rootfs(&manifest, &bundle) {
         Ok(p) => p,
         Err(e) => {
@@ -383,7 +468,20 @@ fn platform_provision() -> RuntimeOperationResult {
         }
     };
 
-    // Step 8: Import into WSL
+    // Step 8: Verify digest
+    emit_progress(
+        app.as_ref(),
+        ProvisioningStep::VerifyDigest,
+        "Verifying rootfs SHA256 digest",
+    );
+    // (Digest verification happens inside download_rootfs)
+
+    // Step 9: Import into WSL
+    emit_progress(
+        app.as_ref(),
+        ProvisioningStep::ImportWsl,
+        "Importing rootfs into WSL",
+    );
     let install_dir = compute_install_dir();
     let import_args = match wsl_import_args(&install_dir, &tarball_path) {
         Ok(args) => args,
@@ -400,7 +498,12 @@ fn platform_provision() -> RuntimeOperationResult {
         return operation_result(RuntimeOperation::Provision, import_result.outcome);
     }
 
-    // Step 9: Write wsl.conf via tee (stdin)
+    // Step 10: Write wsl.conf via tee (stdin) - Configure systemd
+    emit_progress(
+        app.as_ref(),
+        ProvisioningStep::ConfigureSystemd,
+        "Writing wsl.conf to enable systemd",
+    );
     let write_conf_result = run_wsl_stdin(
         &fixed_args(WSL_WRITE_CONF_ARGS),
         WSL_CONF_CONTENTS.as_bytes(),
@@ -409,13 +512,23 @@ fn platform_provision() -> RuntimeOperationResult {
         return operation_result(RuntimeOperation::Provision, write_conf_result.outcome);
     }
 
-    // Step 10: Terminate distro so systemd boots on next start
+    // Step 11: Terminate distro so systemd boots on next start
+    emit_progress(
+        app.as_ref(),
+        ProvisioningStep::RestartWsl,
+        "Terminating distro to boot with systemd",
+    );
     let terminate_result = run_wsl(&fixed_args(WSL_TERMINATE_ARGS));
     if !matches!(terminate_result.outcome, CommandOutcome::Success) {
         return operation_result(RuntimeOperation::Provision, terminate_result.outcome);
     }
 
-    // Step 11: Persist new installed state
+    // Step 12: Persist new installed state
+    emit_progress(
+        app.as_ref(),
+        ProvisioningStep::PersistState,
+        "Persisting installed release state",
+    );
     let new_floor = advanced_rollback_floor(&manifest, installed);
     let new_installed = InstalledRelease {
         sequence: manifest.release_sequence,
@@ -428,6 +541,13 @@ fn platform_provision() -> RuntimeOperationResult {
             detail: Some(format!("failed to persist installed state: {e}")),
         };
     }
+
+    // Step 13: Provision Docker inside the distro
+    emit_progress(
+        app.as_ref(),
+        ProvisioningStep::InstallDocker,
+        "Installing Docker inside the distro",
+    );
 
     // Step 12: Provision Docker inside the distro
     if let Err(e) = provision_docker_in_distro() {
@@ -707,7 +827,7 @@ fn read_wsl_version() -> Option<(u32, u32, u32)> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn platform_provision() -> RuntimeOperationResult {
+fn platform_provision(_app: Option<AppHandle>) -> RuntimeOperationResult {
     unsupported_operation(RuntimeOperation::Provision)
 }
 
@@ -723,8 +843,10 @@ pub fn runtime_status() -> RuntimeStatus {
 // the same: once signed-manifest provisioning is implemented it must hold it,
 // and a comment is easier to miss than a call site that is already correct.
 #[tauri::command(async)]
-pub fn runtime_provision() -> RuntimeOperationResult {
-    with_lifecycle_lock(RuntimeOperation::Provision, platform_provision)
+pub fn runtime_provision(app: AppHandle) -> RuntimeOperationResult {
+    with_lifecycle_lock(RuntimeOperation::Provision, move || {
+        platform_provision(Some(app))
+    })
 }
 
 #[tauri::command(async)]

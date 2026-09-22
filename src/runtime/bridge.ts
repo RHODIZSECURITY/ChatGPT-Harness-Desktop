@@ -1,5 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import type {
+  ProvisioningProgressPayload,
   RuntimeLogsResult,
   RuntimeOperationResult,
   RuntimeStatus,
@@ -18,6 +20,8 @@ export const BROKER_COMMANDS = Object.freeze({
   runtimeRepair: 'runtime_repair',
   runtimeLogs: 'runtime_logs',
 } as const)
+
+export const PROVISIONING_EVENT = 'provisioning-progress'
 
 export function normalizeRuntimeLogLines(lines = DEFAULT_RUNTIME_LOG_LINES): number {
   if (!Number.isFinite(lines)) return DEFAULT_RUNTIME_LOG_LINES
@@ -53,5 +57,15 @@ export async function getRuntimeLogs(
 ): Promise<RuntimeLogsResult> {
   return invoke<RuntimeLogsResult>(BROKER_COMMANDS.runtimeLogs, {
     lines: normalizeRuntimeLogLines(lines),
+  })
+}
+
+export type ProvisioningProgressListener = (payload: ProvisioningProgressPayload) => void
+
+export async function listenProvisioningProgress(
+  listener: ProvisioningProgressListener,
+): Promise<import('@tauri-apps/api/event').UnlistenFn> {
+  return listen<ProvisioningProgressPayload>(PROVISIONING_EVENT, (event) => {
+    listener(event.payload)
   })
 }
