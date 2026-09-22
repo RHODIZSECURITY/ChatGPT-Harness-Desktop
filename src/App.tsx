@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { RootLayout, SidebarStateProvider } from '@opal/layouts'
 import { RouterProvider } from './design/next-shim/navigation'
+import Conversation from './shell/Conversation'
 import HarnessSidebar from './shell/HarnessSidebar'
 import { getRuntimeStatus } from './runtime/bridge'
 import type { ComponentState, RuntimeStatus } from './runtime/types'
@@ -41,28 +42,21 @@ function Shell() {
 
       <RootLayout.App>
         <RootLayout.MainContent>
-          <div className="px-10 py-9">
-            <header className="max-w-2xl">
+          <div className="flex h-full flex-col">
+            <header className="shrink-0 px-10 pt-9 pb-2">
               <p className="text-[11px] font-semibold tracking-[0.14em] text-action-text-link-05 uppercase">
                 Windows Desktop
               </p>
               <h1 className="mt-2.5 text-[32px] leading-tight font-semibold tracking-tight text-text-05">
                 Harness workspace
               </h1>
-              <p className="mt-3 text-sm leading-relaxed text-text-03">
+              <p className="mt-3 max-w-2xl text-sm leading-relaxed text-text-03">
                 Local renderer. Runtime authority remains inside the managed WSL2 stack.
               </p>
             </header>
-
-            <section
-              aria-label="Conversation"
-              className="mt-10 max-w-2xl rounded-xl border border-border-01 bg-background-neutral-01 p-6"
-            >
-              <h2 className="text-sm font-semibold text-text-05">Conversation</h2>
-              <p className="mt-2 text-sm leading-relaxed text-text-03">
-                Connect a Project and open a coding Session to begin.
-              </p>
-            </section>
+            <div className="min-h-0 flex-1">
+              <Conversation core={status?.core.state ?? 'checking'} />
+            </div>
           </div>
         </RootLayout.MainContent>
 
