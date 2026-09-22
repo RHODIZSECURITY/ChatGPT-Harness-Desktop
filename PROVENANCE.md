@@ -148,3 +148,60 @@ wrong major by `npm install` and corrected (`@tanstack/react-table` to ^8,
 **Tests.** `tests/security-contract.test.ts` pins the per-file token checksums
 and the tree digest, and fails if any `ee` path appears under `src/`. The
 router shim has its own suite. `npm run verify:portable` covers the rest.
+
+## Adapted, not vendored: the streaming packet protocol
+
+| field | value |
+| --- | --- |
+| Upstream paths | `web/src/app/app/services/streamingModels.ts`, `web/src/app/app/services/packetUtils.ts`, `web/src/app/app/message/messageComponents/renderMessageComponent.tsx` |
+| Exact commit | `e11c874019dbf04032cfc3476d82eba1d069a3d8` |
+| License | MIT — outside `web/src/ee/` |
+| Local destination | `src/conversation/{protocol,grouping,findRenderer}.ts`, `src/conversation/renderers.tsx` |
+| Classification | **ADAPT.** No upstream bytes are present; the digest above does not cover these files and no checksum is claimed for them. |
+
+This is the one import so far that is written rather than copied, so it is
+recorded differently on purpose. A subset of a file is a different file: taking
+20 of onyx's 60-odd packet types and trimming the rest would produce something
+that neither matches upstream nor can be re-derived from it, and a checksum
+over that would attest to nothing.
+
+**What is kept identical: the wire strings.** `message_delta`, `bash_tool_delta`,
+`coding_agent_final` and the rest carry onyx's exact values, because the value
+is the protocol. Keeping them means onyx's backend, its tests and a captured
+trace stay readable here as a reference for what a packet means. The TypeScript
+construct differs — upstream uses an `enum`, and this repository sets
+`erasableSyntaxOnly`, which forbids one — so it is a `const` object with a
+derived union. That changes the declaration, not a single byte on the wire.
+
+**What is left behind.** Search, citations, deep research, research agents,
+intermediate reports, image generation, the memory tool, `fetch`/`open_url` and
+the Python interpreter. Those describe a retrieval product; this application
+runs an agent in a WSL distro and has no retrieval pipeline to describe.
+
+**What is changed deliberately.** Two things:
+
+1. Upstream's `findRenderer` is fourteen sequential `if` statements. Here the
+   same precedence is an exported `DISPATCH` table, because the order is the
+   behaviour — it is the only thing that decides a group holding both an answer
+   and a tool packet — and a table is a value a test can assert against rather
+   than control flow a test has to re-derive.
+2. Upstream folds `error` packets into the reasoning renderer. Here every
+   renderer ends with the group's error, so a failure that arrives inside a
+   shell command is shown *with* the output that explains it rather than
+   replacing it. `CustomToolRenderer` additionally surfaces the tool's own
+   `delta.error.error_message`, which is not an `error` packet and would
+   otherwise render as nothing at all.
+
+**Security review.** Types, pure functions over arrays, and presentational
+components. No network, storage, timer or Tauri call. Model-authored text
+reaches the DOM only through Opal's `CompactMarkdown`, which sanitizes with
+`rehype-sanitize` against an element allowlist; tool output, file previews and
+command strings are rendered as text nodes, never as markup.
+
+**Tests.** `src/conversation/{grouping,findRenderer,renderers}.test.*` — 20
+tests, 100% line coverage of the four modules. Each guard was verified by
+introducing the regression it claims to catch: eleven mutations, eleven
+failures, including a dropped `tab_index` merging two parallel tools, a
+reordered dispatch table letting a tool capture the answer, a trailing
+`exit_code: null` erasing a real failure, and an `error` packet with no message
+rendering as nothing.

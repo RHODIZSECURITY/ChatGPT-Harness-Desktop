@@ -1,26 +1,37 @@
 import { useState } from 'react'
 import { Button, InputTextArea, Text } from '@opal/components'
+import { findRenderer } from '../conversation/findRenderer'
+import { groupPackets } from '../conversation/grouping'
+import type { Packet } from '../conversation/protocol'
 import type { ComponentState } from '../runtime/types'
-
-export interface ConversationMessage {
-  id: string
-  role: 'operator' | 'harness'
-  body: string
-}
 
 /**
  * The conversation surface.
  *
- * Structured the way onyx structures its own — a scrolling message list above
- * a pinned composer — and built from the same Opal primitives, but over this
- * project's message shape rather than onyx's. Theirs is modelled on a RAG
- * product: `Message` carries retrieved documents, tool invocations, agent
- * identities and an `LlmManager`. Importing it would mean adopting that model
- * before there is anything behind it to fill in.
+ * Structured the way onyx structures its own — a scrolling transcript above a
+ * pinned composer — and over the same streaming packet protocol, narrowed to
+ * the packets an agent doing work emits. See `src/conversation/protocol.ts`
+ * for what was adopted and what was left behind.
+ *
+ * The transcript is packets rather than messages because that is what the
+ * stream produces: text, reasoning, a shell command and its output, a file
+ * read, a tool call. Flattening them to a message body would mean deciding,
+ * at parse time, what is worth keeping.
  */
-export default function Conversation({ core }: { core: ComponentState | 'checking' }) {
-  const [messages] = useState<ConversationMessage[]>([])
+export default function Conversation({
+  core,
+  // Nothing produces packets yet: the send path needs a provisioned runtime to
+  // send to. They arrive as a prop rather than as state owned here so the
+  // transcript renders whatever it is given — which is how it can be exercised
+  // before a stream exists to give it anything.
+  packets = [],
+}: {
+  core: ComponentState | 'checking'
+  packets?: Packet[]
+}) {
   const [draft, setDraft] = useState('')
+
+  const groups = groupPackets(packets)
 
   // The composer is gated on the runtime, not on a feature flag: with the
   // Harness Core down there is nothing to send to, and an input that accepts
@@ -34,7 +45,7 @@ export default function Conversation({ core }: { core: ComponentState | 'checkin
   return (
     <section aria-label="Conversation" className="flex h-full flex-col">
       <div className="flex-1 overflow-auto px-10 py-8">
-        {messages.length === 0 ? (
+        {groups.length === 0 ? (
           <div className="mx-auto max-w-2xl pt-10 text-center">
             <Text font="heading-h3" color="text-04">
               Nothing here yet
@@ -47,21 +58,17 @@ export default function Conversation({ core }: { core: ComponentState | 'checkin
           </div>
         ) : (
           <ol className="mx-auto flex max-w-2xl flex-col gap-6">
-            {messages.map((message) => (
-              <li
-                key={message.id}
-                data-role={message.role}
-                className={
-                  message.role === 'operator'
-                    ? 'self-end rounded-xl bg-background-neutral-02 px-4 py-2.5'
-                    : 'self-start'
-                }
-              >
-                <Text font="main-content-body" color="text-04">
-                  {message.body}
-                </Text>
-              </li>
-            ))}
+            {groups.map((group) => {
+              const Renderer = findRenderer(group)
+              // A group of only control packets renders nothing, and an empty
+              // list item would still occupy a row.
+              if (Renderer === null) return null
+              return (
+                <li key={`${group.turn_index}-${group.tab_index}`}>
+                  <Renderer group={group} />
+                </li>
+              )
+            })}
           </ol>
         )}
       </div>

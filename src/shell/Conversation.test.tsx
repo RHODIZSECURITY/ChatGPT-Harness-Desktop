@@ -48,3 +48,21 @@ test('the empty state is a statement, not an error', () => {
   render(<Conversation core="ready" />)
   expect(screen.getByText('Nothing here yet')).toBeInTheDocument()
 })
+
+test('the transcript renders the packets it is given, and skips the ones with nothing to show', () => {
+  render(
+    <Conversation
+      core="ready"
+      packets={[
+        { placement: { turn_index: 0 }, obj: { type: 'message_delta', content: 'Provisioned.' } },
+        { placement: { turn_index: 1 }, obj: { type: 'stop', stop_reason: 'finished' } },
+      ]}
+    />,
+  )
+
+  expect(screen.getByText('Provisioned.')).toBeTruthy()
+  // The `stop` group carries no content, and an empty list item would still
+  // take up a row in the transcript.
+  expect(screen.getAllByRole('listitem')).toHaveLength(1)
+  expect(screen.queryByText('Nothing here yet')).toBeNull()
+})
