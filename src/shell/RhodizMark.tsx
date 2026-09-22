@@ -3,7 +3,11 @@ import type { IconProps } from '@opal/types'
 // sidebar, the title bar and the taskbar cannot drift apart. There is no
 // vector of the mark in this repository; when one exists it replaces this
 // file and nothing that renders it has to change.
-import markUrl from '../../src-tauri/icons/32x32.png'
+//
+// The 64px layer, not the 32px one: this renders at 28 CSS pixels, which is
+// 56 device pixels on the 2x display the window is expected to run on, and a
+// 32px source upscaled to 56 is visibly soft.
+import markUrl from '../../src-tauri/icons/64x64.png'
 
 /**
  * The RHODIZ mark, in the shape `SidebarLayouts.Header`'s `renderAppLogo`
