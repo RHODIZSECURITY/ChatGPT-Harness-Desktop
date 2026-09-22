@@ -1,27 +1,29 @@
 import type { IconProps } from '@opal/types'
+// The application icon itself, imported from where Tauri bundles it so the
+// sidebar, the title bar and the taskbar cannot drift apart. There is no
+// vector of the mark in this repository; when one exists it replaces this
+// file and nothing that renders it has to change.
+import markUrl from '../../src-tauri/icons/32x32.png'
 
 /**
- * The RHODIZ mark, in Opal's icon shape so it can be handed to
- * `SidebarLayouts.Header`'s `renderAppLogo`.
+ * The RHODIZ mark, in the shape `SidebarLayouts.Header`'s `renderAppLogo`
+ * expects.
  *
- * The two colours are the ones decoded out of `src-tauri/icons/32x32.png`, so
- * the sidebar and the taskbar show the same mark rather than two that merely
- * look related. `currentColor` is deliberately not used: a brand mark that
- * inherits the text colour stops being the brand mark.
+ * `IconProps` is declared over `SVGProps`, and this renders an `<img>`,
+ * so the SVG-specific attributes are deliberately not forwarded: passing
+ * `strokeWidth` to an image would be silently meaningless. Only `size` and
+ * the accessible name apply.
  */
-export default function RhodizMark({ size = 28, ...props }: IconProps) {
+export default function RhodizMark({ size = 28 }: IconProps) {
   return (
-    <svg
+    <img
+      src={markUrl}
       width={size}
       height={size}
-      viewBox="0 0 32 32"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-      {...props}
-    >
-      <circle cx="16" cy="16" r="13" stroke="#22cde3" strokeWidth="2.5" />
-      <path d="M16 9v14" stroke="#ffc62f" strokeWidth="2.5" strokeLinecap="round" />
-      <path d="M11 13.5h10" stroke="#22cde3" strokeWidth="2.5" strokeLinecap="round" />
-    </svg>
+      alt=""
+      aria-hidden="true"
+      draggable={false}
+      className="select-none"
+    />
   )
 }
