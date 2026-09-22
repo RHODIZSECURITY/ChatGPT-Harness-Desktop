@@ -1110,9 +1110,10 @@ pub fn runtime_status() -> RuntimeStatus {
     platform_status()
 }
 
-// Provisioning performs no mutation yet, but it takes the lifecycle lock all
-// the same: once signed-manifest provisioning is implemented it must hold it,
-// and a comment is easier to miss than a call site that is already correct.
+// Provisioning is the most mutating operation there is: it imports a distro,
+// writes into it, and rewrites the broker's own state file. The lock has to be
+// held across all of it, not just the wsl.exe calls -- a concurrent start
+// aimed at a half-imported distro is the failure it exists to prevent.
 #[tauri::command(async)]
 pub fn runtime_provision(app: AppHandle) -> RuntimeOperationResult {
     with_lifecycle_lock(RuntimeOperation::Provision, move || {
