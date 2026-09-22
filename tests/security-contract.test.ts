@@ -393,3 +393,69 @@ test('provisioning fails closed on unreadable state and installs before it recor
   expect(broker).not.toMatch(/var_os\("LOCALAPPDATA"\)\s*\)?\s*\.\s*unwrap\(\)/)
   expect(broker).not.toMatch(/var_os\("LOCALAPPDATA"\)\.expect\(/)
 })
+
+// Every byte the broker pulls off the network arrives before anything has
+// verified it, and arrives at a length the server chooses. Both facts have to
+// be handled at the read itself: a ceiling checked afterwards runs only once
+// the body is already in memory, and a request with no deadline never reaches
+// the check at all. Neither is expressible as a type, so pin them here.
+test('network reads are bounded in size and time before anything verifies them', async () => {
+  const broker = await read('src-tauri/src/broker.rs')
+
+  // No client without deadlines. `Client::new()` is the constructor that
+  // gives you one, so its absence is what makes the builders below the only
+  // way to get a client at all.
+  expect(broker).not.toContain('reqwest::blocking::Client::new()')
+
+  // Each builder is checked on its own body. Asserting the connect deadline
+  // appears somewhere in the file would pass with one client still missing
+  // it, which is exactly the shape this has to rule out.
+  const clientBody = (name: string) => {
+    const at = broker.indexOf(`fn ${name}() -> Result<reqwest::blocking::Client, String> {`)
+    expect(at, `${name} is missing`).toBeGreaterThan(-1)
+    const end = broker.indexOf('\n}', at)
+    expect(end).toBeGreaterThan(at)
+    return broker.slice(at, end)
+  }
+  const manifestClient = clientBody('manifest_client')
+  const rootfsClient = clientBody('rootfs_client')
+  for (const body of [manifestClient, rootfsClient]) {
+    expect(body).toContain('.connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))')
+  }
+
+  // The manifest and its signature are small and fixed-size, so they also
+  // carry a whole-request deadline. The rootfs deliberately does not: a total
+  // timeout there would cap how large a legitimate rootfs may be, and
+  // reqwest's blocking builder offers no per-read inactivity timeout to use
+  // in its place.
+  expect(manifestClient).toContain('.timeout(Duration::from_secs(MANIFEST_HTTP_TIMEOUT_SECS))')
+  expect(rootfsClient).not.toMatch(/\.timeout\(/)
+
+  // The manifest and signature bodies are bounded where they are read, not
+  // where they are checked. `verify_release_manifest` does enforce
+  // MAX_MANIFEST_BYTES, but only on a Vec that is already in memory -- an
+  // endless response body exhausts RAM before it ever runs.
+  expect(broker).toContain('read_body_bounded(manifest_resp, MAX_MANIFEST_BYTES, "manifest")')
+  expect(broker).toContain('read_body_bounded(sig_resp, MANIFEST_SIGNATURE_LEN, "signature")')
+
+  // ...and that helper refuses rather than truncates. A prefix of a signed
+  // document is not a shorter signed document.
+  const bodyBoundedAt = broker.indexOf('fn read_body_bounded(')
+  expect(bodyBoundedAt).toBeGreaterThan(-1)
+  expect(broker.slice(bodyBoundedAt, bodyBoundedAt + 600)).toContain('exceeds its {limit}-byte ceiling')
+
+  // The rootfs is streamed to disk under a ceiling, never buffered whole. The
+  // digest comparison cannot stand in for either: it runs only after the
+  // write has finished.
+  expect(broker).toContain('io::copy(&mut (&mut resp).take(MAX_ROOTFS_BYTES + 1), &mut file)')
+  expect(broker).not.toMatch(/resp\s*\n?\s*\.bytes\(\)/)
+
+  // Hitting the ceiling removes the partial file before returning. Scoped to
+  // the ceiling branch itself: the digest-mismatch branch further down does
+  // its own cleanup, and a slice wide enough to include it would pass on that
+  // one alone.
+  const ceilingAt = broker.indexOf('if copied > MAX_ROOTFS_BYTES {')
+  expect(ceilingAt).toBeGreaterThan(-1)
+  const ceilingBranch = broker.slice(ceilingAt, broker.indexOf('return Err(', ceilingAt))
+  expect(ceilingBranch).toContain('fs::remove_file(&tarball_path)')
+})

@@ -13,7 +13,8 @@ use rhodiz_harness_broker_core::{
     parse_release_manifest, provisioning_preflight, resolve_runtime_bundle, runtime_log_args,
     verify_release_manifest, wsl_import_args, wsl_start_args, wsl_stop_args, wsl_terminate_args,
     wsl_write_conf_args, DistroSlot, InstalledRelease, ReleaseManifest, RuntimeBundle,
-    UpdateDecision, MANAGED_DISTRO_NAME, WSL_CONF_CONTENTS, WSL_VERSION_ARGS,
+    UpdateDecision, MANAGED_DISTRO_NAME, MANIFEST_SIGNATURE_LEN, MAX_MANIFEST_BYTES,
+    WSL_CONF_CONTENTS, WSL_VERSION_ARGS,
 };
 
 // `AppHandle` is referenced by both platforms (the non-Windows `platform_provision`
@@ -47,7 +48,7 @@ use std::sync::{Mutex, TryLockError};
 use std::{
     env,
     fs::{self, File, OpenOptions},
-    io::{ErrorKind, Read, Write},
+    io::{self, ErrorKind, Read, Write},
     os::windows::{fs::OpenOptionsExt, process::CommandExt},
     path::PathBuf,
     process::{Command, Stdio},
@@ -641,7 +642,7 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
 fn fetch_manifest_and_signature() -> Result<(Vec<u8>, Vec<u8>), String> {
     let update_url = env::var("RHODIZ_UPDATE_URL")
         .map_err(|_| "RHODIZ_UPDATE_URL environment variable not set".to_string())?;
-    let client = reqwest::blocking::Client::new();
+    let client = manifest_client()?;
 
     // Fetch manifest
     let manifest_url = format!("{}/release.json", update_url.trim_end_matches('/'));
@@ -652,10 +653,7 @@ fn fetch_manifest_and_signature() -> Result<(Vec<u8>, Vec<u8>), String> {
     if !manifest_resp.status().is_success() {
         return Err(format!("manifest HTTP {}", manifest_resp.status()));
     }
-    let manifest_bytes = manifest_resp
-        .bytes()
-        .map_err(|e| format!("manifest read failed: {e}"))?
-        .to_vec();
+    let manifest_bytes = read_body_bounded(manifest_resp, MAX_MANIFEST_BYTES, "manifest")?;
 
     // Fetch signature
     let sig_url = format!("{}/release.json.sig", update_url.trim_end_matches('/'));
@@ -666,10 +664,7 @@ fn fetch_manifest_and_signature() -> Result<(Vec<u8>, Vec<u8>), String> {
     if !sig_resp.status().is_success() {
         return Err(format!("signature HTTP {}", sig_resp.status()));
     }
-    let signature_bytes = sig_resp
-        .bytes()
-        .map_err(|e| format!("signature read failed: {e}"))?
-        .to_vec();
+    let signature_bytes = read_body_bounded(sig_resp, MANIFEST_SIGNATURE_LEN, "signature")?;
 
     Ok((manifest_bytes, signature_bytes))
 }
@@ -825,8 +820,7 @@ fn download_rootfs(bundle: &RuntimeBundle) -> Result<String, String> {
     let tarball_url = format!("{}/rootfs.tar.gz", base);
 
     let tarball_path = download_dir.join("rootfs.tar.gz");
-    let client = reqwest::blocking::Client::new();
-    let resp = client
+    let mut resp = rootfs_client()?
         .get(&tarball_url)
         .send()
         .map_err(|e| format!("rootfs GET failed: {e}"))?;
@@ -834,11 +828,27 @@ fn download_rootfs(bundle: &RuntimeBundle) -> Result<String, String> {
         return Err(format!("rootfs HTTP {}", resp.status()));
     }
 
+    // Streamed, not buffered. Reading the body into a `Vec` first puts an
+    // entire rootfs in memory, and the length is whatever the server chooses
+    // to send -- a hostile or broken one can exhaust RAM before a single byte
+    // is checked. `io::copy` moves it in fixed-size chunks instead.
+    //
+    // `take` is the ceiling on what reaches the disk. Without it the same
+    // server fills the volume, and the digest comparison below cannot help:
+    // it only runs once the write has finished. The bound is not a claim
+    // about how large a real rootfs is -- it is an order of magnitude above
+    // any plausible one -- so hitting it means the response is wrong, and the
+    // partial file is removed rather than left to be imported.
     let mut file = File::create(&tarball_path).map_err(|e| e.to_string())?;
-    let bytes = resp
-        .bytes()
-        .map_err(|e| format!("rootfs read failed: {e}"))?;
-    file.write_all(&bytes).map_err(|e| e.to_string())?;
+    let copied = io::copy(&mut (&mut resp).take(MAX_ROOTFS_BYTES + 1), &mut file)
+        .map_err(|e| format!("rootfs write failed: {e}"))?;
+    drop(file);
+    if copied > MAX_ROOTFS_BYTES {
+        let _ = fs::remove_file(&tarball_path);
+        return Err(format!(
+            "rootfs exceeds its {MAX_ROOTFS_BYTES}-byte ceiling"
+        ));
+    }
 
     // NOT a rootfs integrity check. `compose_sha256` is the digest of the
     // compose file, and the manifest schema carries no digest for the rootfs
@@ -857,6 +867,88 @@ fn download_rootfs(bundle: &RuntimeBundle) -> Result<String, String> {
     }
 
     Ok(tarball_path.to_string_lossy().to_string())
+}
+
+/// Reads a response body, refusing one larger than `limit`.
+///
+/// Deliberately not `read_bounded`, which this file already has: that one
+/// serves log capture, where truncating an over-long `wsl.exe` transcript and
+/// flagging it is the right answer. Truncating a manifest is not -- a prefix
+/// of a signed document is not a shorter signed document, and the caller has
+/// no use for one. So this refuses instead of trimming.
+///
+/// The ceiling has to be applied here, at the read, not by the code that
+/// consumes the bytes. `verify_release_manifest` does enforce
+/// `MAX_MANIFEST_BYTES`, but only once it has been handed a `Vec` that is
+/// already in memory -- so a server answering the manifest URL with an endless
+/// body exhausts RAM before a single check runs. `take` bounds the read
+/// itself, and asking for one byte past the limit is what makes "too large"
+/// distinguishable from "exactly at the limit".
+#[cfg(target_os = "windows")]
+fn read_body_bounded(
+    mut resp: reqwest::blocking::Response,
+    limit: usize,
+    what: &str,
+) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    (&mut resp)
+        .take(limit as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("{what} read failed: {e}"))?;
+    if buf.len() > limit {
+        return Err(format!("{what} exceeds its {limit}-byte ceiling"));
+    }
+    Ok(buf)
+}
+
+/// Ceiling on the rootfs tarball, in bytes.
+///
+/// Deliberately far above any real WSL rootfs. It exists so that a server
+/// which streams without end is refused instead of filling the disk, not to
+/// express an expected size -- the signed manifest carries no size for the
+/// tarball, so there is nothing authoritative to compare against.
+#[cfg(target_os = "windows")]
+const MAX_ROOTFS_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// How long the broker waits to reach the update host.
+///
+/// Connecting is the one phase with a bounded, predictable cost, so it gets a
+/// deadline regardless of what is being fetched.
+#[cfg(target_os = "windows")]
+const HTTP_CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// Total deadline for the manifest and its signature.
+///
+/// Both are small and fixed-size -- `MAX_MANIFEST_BYTES` and
+/// `MANIFEST_SIGNATURE_LEN` -- so a whole-request deadline is safe here: it
+/// cannot cut short a legitimate transfer.
+#[cfg(target_os = "windows")]
+const MANIFEST_HTTP_TIMEOUT_SECS: u64 = 30;
+
+#[cfg(target_os = "windows")]
+fn manifest_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(MANIFEST_HTTP_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("cannot build the update client: {e}"))
+}
+
+/// The client for the rootfs body.
+///
+/// Connect is bounded; the transfer is not. A whole-request deadline would
+/// cap how large a rootfs may legitimately be, or how slow a link may be, and
+/// `reqwest`'s blocking builder exposes no per-read inactivity timeout to use
+/// instead. So a server that trickles bytes indefinitely still stalls
+/// provisioning -- a known gap, bounded only by `MAX_ROOTFS_BYTES`, and one
+/// the operator can still interrupt by closing the app. Fixing it properly
+/// needs an inactivity deadline the blocking API does not offer.
+#[cfg(target_os = "windows")]
+fn rootfs_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("cannot build the update client: {e}"))
 }
 
 #[cfg(target_os = "windows")]
