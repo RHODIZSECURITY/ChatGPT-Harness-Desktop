@@ -459,6 +459,52 @@ pub fn lifecycle_lock_unavailable(operation: RuntimeOperation) -> RuntimeOperati
     }
 }
 
+/// The broker could not tell which distro slot is live.
+///
+/// Every distro-scoped command names a slot, and the slot is only knowable
+/// from the persisted state file. Once an update can stage into the inactive
+/// slot, two distros can exist at once, so an unreadable state file is not a
+/// missing value with a safe default -- it is a command with no defensible
+/// target. These constructors exist so each surface refuses in its own shape
+/// instead of guessing.
+pub fn lifecycle_slot_unresolved(
+    operation: RuntimeOperation,
+    reason: &str,
+) -> RuntimeOperationResult {
+    RuntimeOperationResult {
+        operation,
+        state: OperationState::Failed,
+        detail: Some(format!(
+            "the active runtime slot could not be resolved: {reason}"
+        )),
+    }
+}
+
+/// Verification's shape of the same refusal. `unit` is `Unknown` rather than
+/// any concrete state: nothing was probed, so nothing is known.
+pub fn verify_slot_unresolved(reason: &str) -> RuntimeVerifyResult {
+    RuntimeVerifyResult {
+        operation: RuntimeOperation::Verify,
+        unit: UnitState::Unknown,
+        healthy: false,
+        detail: format!("the active runtime slot could not be resolved: {reason}"),
+        unprobed: UNPROBED_COMPONENTS.to_vec(),
+    }
+}
+
+/// Logs' shape of the same refusal: no lines, and `truncated` false because
+/// nothing was read to truncate.
+pub fn logs_slot_unresolved(reason: &str) -> RuntimeLogsResult {
+    RuntimeLogsResult {
+        state: OperationState::Failed,
+        lines: Vec::new(),
+        truncated: false,
+        detail: Some(format!(
+            "the active runtime slot could not be resolved: {reason}"
+        )),
+    }
+}
+
 pub fn provisioning_blocked() -> RuntimeOperationResult {
     RuntimeOperationResult {
         operation: RuntimeOperation::Provision,
@@ -921,6 +967,44 @@ mod tests {
         }
         let poisoned = lifecycle_lock_unavailable(RuntimeOperation::Stop);
         assert_eq!(poisoned.state, OperationState::Failed);
+    }
+
+    #[test]
+    fn an_unresolved_slot_never_reads_as_healthy_or_succeeded() {
+        let reason = "installed state does not parse";
+
+        let lifecycle = lifecycle_slot_unresolved(RuntimeOperation::Start, reason);
+        assert_eq!(lifecycle.state, OperationState::Failed);
+        assert_eq!(lifecycle.operation, RuntimeOperation::Start);
+
+        let verify = verify_slot_unresolved(reason);
+        assert!(!verify.healthy);
+        assert_eq!(verify.unit, UnitState::Unknown);
+        // Nothing was probed, so nothing may be reported as probed.
+        assert_eq!(verify.unprobed.len(), UNPROBED_COMPONENTS.len());
+
+        let logs = logs_slot_unresolved(reason);
+        assert_eq!(logs.state, OperationState::Failed);
+        assert!(logs.lines.is_empty());
+        // No read happened, so there is nothing that could have been truncated.
+        assert!(!logs.truncated);
+
+        // The cause travels to the renderer in all three shapes. A refusal
+        // that does not say why is one an operator cannot act on.
+        assert!(lifecycle.detail.unwrap().contains(reason));
+        assert!(verify.detail.contains(reason));
+        assert!(logs.detail.unwrap().contains(reason));
+    }
+
+    #[test]
+    fn discarding_derives_the_dead_slot_from_the_live_one() {
+        for live in [DistroSlot::INITIAL, DistroSlot::INITIAL.other()] {
+            let args = wsl_discard_inactive_args(live);
+            assert_eq!(args[0], "--unregister");
+            // The live distro can never be the one named for destruction.
+            assert_ne!(args[1], live.distro_name());
+            assert_eq!(args[1], live.other().distro_name());
+        }
     }
 
     #[test]

@@ -140,9 +140,43 @@ test('verify is a read-only exit-code probe and repair is bounded to one unit', 
   // Both spawns are aimed at the same slot, read once. Resolving the slot
   // twice would let a swap land between them and restart a unit in a distro
   // the reset never touched.
-  expect(broker).toContain('let slot = active_slot();')
+  expect(broker).toContain('let slot = match active_slot() {')
   expect(core).toContain('"reset-failed"')
   expect(core).toContain('"restart"')
+})
+
+test('the update stages into the inactive slot and destroys nothing until the swap is durable', async () => {
+  const core = await read('src-tauri/broker-core/src/lib.rs')
+  const broker = await read('src-tauri/src/broker.rs')
+
+  // The slot to destroy is always derived from the slot that is live, never
+  // named. A vector that accepted the name to remove would be one
+  // argument-passing mistake away from unregistering the running runtime.
+  expect(core).toContain('pub const fn wsl_discard_inactive_args(active: DistroSlot)')
+  expect(core).toContain('["--unregister", active.other().distro_name()]')
+
+  // A first install is decided by the *presence* of state, not by inverting
+  // the active slot. `active_slot()` answers INITIAL when there is no state,
+  // so `.other()` would send a first install into the secondary slot and
+  // leave the primary one permanently empty.
+  expect(broker).toContain(
+    'let target_slot = previous_slot.map_or(DistroSlot::INITIAL, DistroSlot::other);',
+  )
+  // Asserted against code only: the comment above that derivation names the
+  // rejected form in order to explain it, and would otherwise trip this.
+  const brokerCode = broker
+    .split('\n')
+    .filter((line) => !line.trimStart().startsWith('//'))
+    .join('\n')
+  expect(brokerCode).not.toContain('active_slot().other()')
+
+  // The superseded distro is reclaimed only after the swap is on disk.
+  // Reclaiming first would destroy the runtime the operator is still using to
+  // serve a provision that can still fail.
+  const persistAt = broker.indexOf('persist_installed_release(&new_installed, target_slot)')
+  const reclaimAt = broker.indexOf('wsl_discard_inactive_args(target_slot)')
+  expect(persistAt).toBeGreaterThan(-1)
+  expect(reclaimAt).toBeGreaterThan(persistAt)
 })
 
 test('log redaction matches credential prefixes only at token boundaries', async () => {
@@ -370,7 +404,7 @@ test('provisioning fails closed on unreadable state and installs before it recor
   // on the span between the load and the decision: a `Failed` return has to
   // sit inside it, which is what stops provisioning before a floor-less
   // decision can be made.
-  const loadAt = broker.indexOf('match load_installed_release()')
+  const loadAt = broker.indexOf('match load_persisted_state() {')
   const decideAt = broker.indexOf('decide_update(&manifest, installed)')
   expect(loadAt).toBeGreaterThan(-1)
   expect(decideAt).toBeGreaterThan(loadAt)

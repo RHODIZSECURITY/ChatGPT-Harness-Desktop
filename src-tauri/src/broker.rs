@@ -1,7 +1,7 @@
 use rhodiz_harness_broker_core::{
-    classify_wsl_status, lifecycle_busy, lifecycle_lock_unavailable, operation_result,
-    runtime_status as build_status, sanitize_log_text, CommandOutcome, OperationState,
-    RuntimeLogsResult, RuntimeOperation, RuntimeOperationResult, RuntimeStatus,
+    classify_wsl_status, lifecycle_busy, lifecycle_lock_unavailable, lifecycle_slot_unresolved,
+    operation_result, runtime_status as build_status, sanitize_log_text, CommandOutcome,
+    OperationState, RuntimeLogsResult, RuntimeOperation, RuntimeOperationResult, RuntimeStatus,
     RuntimeVerifyResult, COMMAND_TIMEOUT_SECS, MAX_CAPTURE_BYTES, WSL_EXE, WSL_STATUS_ARGS,
 };
 
@@ -11,10 +11,10 @@ use rhodiz_harness_broker_core::{
 use rhodiz_harness_broker_core::{
     advanced_rollback_floor, decide_update, decode_utf16le, extract_wsl_version,
     parse_release_manifest, provisioning_preflight, resolve_runtime_bundle, runtime_log_args,
-    verify_release_manifest, wsl_import_args, wsl_start_args, wsl_stop_args, wsl_terminate_args,
-    wsl_write_conf_args, DistroSlot, InstalledRelease, ReleaseManifest, RuntimeBundle,
-    UpdateDecision, MANAGED_DISTRO_NAME, MANIFEST_SIGNATURE_LEN, MAX_MANIFEST_BYTES,
-    WSL_CONF_CONTENTS, WSL_VERSION_ARGS,
+    verify_release_manifest, wsl_discard_inactive_args, wsl_import_args, wsl_start_args,
+    wsl_stop_args, wsl_terminate_args, wsl_write_conf_args, DistroSlot, InstalledRelease,
+    ReleaseManifest, RuntimeBundle, UpdateDecision, MANAGED_DISTRO_NAME, MANIFEST_SIGNATURE_LEN,
+    MAX_MANIFEST_BYTES, WSL_CONF_CONTENTS, WSL_VERSION_ARGS,
 };
 
 // `AppHandle` is referenced by both platforms (the non-Windows `platform_provision`
@@ -33,7 +33,8 @@ use rhodiz_harness_broker_core::{unsupported_operation, unsupported_verify};
 // implementations of the platform functions below.
 #[cfg(target_os = "windows")]
 use rhodiz_harness_broker_core::{
-    verify_result, wsl_repair_reset_args, wsl_repair_restart_args, wsl_verify_args,
+    logs_slot_unresolved, verify_result, verify_slot_unresolved, wsl_repair_reset_args,
+    wsl_repair_restart_args, wsl_verify_args,
 };
 
 #[cfg(target_os = "windows")]
@@ -234,26 +235,26 @@ fn fixed_args<const N: usize>(args: [&str; N]) -> Vec<String> {
 // provision is picked up by the next command instead of being shadowed by a
 // value read at startup.
 #[cfg(target_os = "windows")]
-fn fixed_start_args() -> Vec<String> {
-    fixed_args(wsl_start_args(active_slot()))
+fn fixed_start_args() -> Result<Vec<String>, String> {
+    Ok(fixed_args(wsl_start_args(active_slot()?)))
 }
 
 #[cfg(target_os = "windows")]
-fn fixed_stop_args() -> Vec<String> {
-    fixed_args(wsl_stop_args(active_slot()))
+fn fixed_stop_args() -> Result<Vec<String>, String> {
+    Ok(fixed_args(wsl_stop_args(active_slot()?)))
 }
 
 // There is no `wsl.exe` to aim at off Windows, and `platform_operation`
 // discards the vector there rather than spawning anything. Building a real
 // one would mean reading a state file that the fallback never writes.
 #[cfg(not(target_os = "windows"))]
-fn fixed_start_args() -> Vec<String> {
-    Vec::new()
+fn fixed_start_args() -> Result<Vec<String>, String> {
+    Ok(Vec::new())
 }
 
 #[cfg(not(target_os = "windows"))]
-fn fixed_stop_args() -> Vec<String> {
-    Vec::new()
+fn fixed_stop_args() -> Result<Vec<String>, String> {
+    Ok(Vec::new())
 }
 
 #[cfg(target_os = "windows")]
@@ -279,7 +280,11 @@ fn platform_operation(operation: RuntimeOperation, _args: &[String]) -> RuntimeO
 
 #[cfg(target_os = "windows")]
 fn platform_verify() -> RuntimeVerifyResult {
-    verify_result(run_wsl(&fixed_args(wsl_verify_args(active_slot()))).outcome)
+    let slot = match active_slot() {
+        Ok(slot) => slot,
+        Err(reason) => return verify_slot_unresolved(&reason),
+    };
+    verify_result(run_wsl(&fixed_args(wsl_verify_args(slot))).outcome)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -294,7 +299,10 @@ fn platform_verify() -> RuntimeVerifyResult {
 /// diagnosis the failure produces stays correct.
 #[cfg(target_os = "windows")]
 fn platform_repair() -> RuntimeOperationResult {
-    let slot = active_slot();
+    let slot = match active_slot() {
+        Ok(slot) => slot,
+        Err(reason) => return lifecycle_slot_unresolved(RuntimeOperation::Repair, &reason),
+    };
     let _ = run_wsl(&fixed_args(wsl_repair_reset_args(slot)));
     operation_result(
         RuntimeOperation::Repair,
@@ -435,18 +443,41 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
     // replay attack the floor exists to stop. Refusing is the safe answer:
     // provisioning stops, and a machine that cannot read its own state was not
     // going to provision correctly anyway.
-    let installed = match load_installed_release() {
+    //
+    // One read answers both questions this file is asked, and deliberately so:
+    // the floor comes out of it, and so does the slot that is serving. Reading
+    // it twice would let the two disagree -- a decision measured against one
+    // install while the import is aimed at another.
+    let state = match load_persisted_state() {
         Ok(v) => v,
         Err(e) => {
             return RuntimeOperationResult {
                 operation: RuntimeOperation::Provision,
                 state: OperationState::Failed,
                 detail: Some(format!(
-                    "refusing to provision: cannot establish the anti-rollback floor ({e})"
+                    "refusing to provision: cannot read the installed state, so neither the anti-rollback floor nor the live slot is known ({e})"
                 )),
             };
         }
     };
+    let installed = state.as_ref().map(|s| InstalledRelease {
+        sequence: s.sequence,
+        rollback_floor: s.rollback_floor,
+    });
+
+    // Where this install lands, derived from whether anything is serving now.
+    //
+    // The slot is taken from the *presence* of state rather than from
+    // `active_slot().other()`, because those two disagree exactly once and it
+    // is the case that matters most. With no state file nothing is serving,
+    // `active_slot()` answers `INITIAL` for want of anything else to say, and
+    // `.other()` would send a first install into the secondary slot -- leaving
+    // the primary one permanently empty and every later update flip-flopping
+    // around a distro that never existed. Presence does not have that failure:
+    // no state means a first install, which goes to `INITIAL`; state means an
+    // update, which stages into whichever slot is not live.
+    let previous_slot = state.as_ref().map(|s| s.active_slot);
+    let target_slot = previous_slot.map_or(DistroSlot::INITIAL, DistroSlot::other);
     let decision = decide_update(&manifest, installed);
     let decision_clone = decision; // for match
     let decision_desc = match decision_clone {
@@ -526,12 +557,23 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
         ProvisioningStep::ImportWsl,
         "Importing rootfs into WSL",
     );
-    // Every distro-scoped command below names this slot rather than a fixed
-    // distro. It is still the primary slot: staging the import into the
-    // inactive slot needs the lifecycle commands to resolve the active slot
-    // too, which they do not yet, and provisioning into a slot the rest of
-    // the broker cannot address would be worse than not staging at all.
-    let target_slot = DistroSlot::INITIAL;
+    // An update stages into the slot that is not serving, so the running
+    // runtime keeps running until the swap. `wsl.exe --import` refuses a name
+    // that already exists, and a previous update that died after its import
+    // leaves exactly that, so the staging slot is cleared first. Passing the
+    // *live* slot is what makes that safe: the vector derives the name to
+    // destroy, and cannot be handed the one in use.
+    //
+    // A first install has no live slot to derive from, so it does not take
+    // this path. That leaves one case uncovered: a first install that failed
+    // after its import leaves an `INITIAL` distro behind and no state file, so
+    // the retry hits the name collision this clears for updates. Reaching it
+    // safely needs a vector that names a slot directly, which is the inversion
+    // `wsl_discard_inactive_args` exists to prevent -- so it is recorded here
+    // rather than worked around.
+    if let Some(live_slot) = previous_slot {
+        let _ = run_wsl(&fixed_args(wsl_discard_inactive_args(live_slot)));
+    }
     let install_dir = match compute_install_dir() {
         Ok(dir) => dir,
         Err(e) => {
@@ -614,11 +656,12 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
         sequence: manifest.release_sequence,
         rollback_floor: new_floor,
     };
-    // Provisioning still imports into the primary slot, so that is the slot
-    // this install leaves serving. Staging into the inactive slot is the next
-    // change; recording the slot now is what lets the lifecycle commands
-    // follow it when it starts to move.
-    if let Err(e) = persist_installed_release(&new_installed, DistroSlot::INITIAL) {
+    // This write is the swap. Until it lands, the previous distro is still
+    // the one every lifecycle command resolves to, and a failure anywhere
+    // above leaves the operator running exactly what they were running
+    // before. After it lands, the staged slot is live -- which is why it
+    // comes after the Docker install and not before it.
+    if let Err(e) = persist_installed_release(&new_installed, target_slot) {
         return RuntimeOperationResult {
             operation: RuntimeOperation::Provision,
             state: OperationState::Failed,
@@ -626,12 +669,34 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
         };
     }
 
+    // The superseded distro is reclaimed only now, after the swap is durable.
+    // Doing it earlier would destroy the runtime the operator is still using
+    // to serve a provision that might yet fail.
+    //
+    // Its failure does not fail the provision. The new runtime is installed,
+    // recorded and serving; the only consequence left is a distro taking disk
+    // and serving nothing, and reporting a completed install as failed would
+    // invite a retry that reinstalls what is already correct. It is not
+    // swallowed either -- the leftover is named in the result, because a
+    // distro the broker meant to remove and did not is something the operator
+    // has to be able to see.
+    let mut reclaimed_note = String::new();
+    if previous_slot.is_some()
+        && run_wsl(&fixed_args(wsl_discard_inactive_args(target_slot))).outcome
+            != CommandOutcome::Success
+    {
+        reclaimed_note = format!(
+            "; the superseded distro {} could not be removed and is still on disk",
+            target_slot.other().distro_name()
+        );
+    }
+
     RuntimeOperationResult {
         operation: RuntimeOperation::Provision,
         state: OperationState::Succeeded,
         detail: Some(format!(
-            "provisioned {} ({})",
-            decision_desc, manifest.release_id
+            "provisioned {} ({}){}",
+            decision_desc, manifest.release_id, reclaimed_note
         )),
     }
 }
@@ -728,35 +793,23 @@ fn load_persisted_state() -> Result<Option<PersistedState>, String> {
         .map_err(|e| format!("installed state at {} does not parse: {e}", path.display()))
 }
 
-#[cfg(target_os = "windows")]
-fn load_installed_release() -> Result<Option<InstalledRelease>, String> {
-    Ok(load_persisted_state()?.map(|state| InstalledRelease {
-        sequence: state.sequence,
-        rollback_floor: state.rollback_floor,
-    }))
-}
-
 /// The slot every lifecycle command is aimed at.
 ///
 /// Absent state answers `INITIAL`: before the first provision there is no
 /// file, and the primary slot is where a first install lands, so that is the
 /// only slot a command could be talking about.
 ///
-/// Unreadable state also answers `INITIAL`, and that is a knowing compromise
-/// rather than a safe default. Today provisioning always imports into the
-/// primary slot, so the secondary distro never exists and the fallback cannot
-/// name the wrong one. That stops being true the moment the swap lands: a
-/// corrupt state file would then aim `start` at a stale distro that is still
-/// on disk. The fix belongs with the swap -- the lifecycle commands need to
-/// carry a failure out to the renderer, which means threading `Result` through
-/// all five of them -- and doing it here first would be a signature change
-/// with nothing yet able to trigger the bug it guards.
+/// Unreadable state is refused rather than defaulted, which is what the swap
+/// made necessary. While provisioning only ever imported into the primary
+/// slot, a corrupt file could be read as `INITIAL` without naming the wrong
+/// distro, because no other distro existed. Now that an update stages into
+/// the inactive slot, both can be on disk at once, and guessing would aim a
+/// lifecycle command at whichever one happens to be stale -- starting a
+/// runtime the operator is not running, or restarting a half-provisioned one.
+/// There is no safe guess, so every caller carries the failure out instead.
 #[cfg(target_os = "windows")]
-fn active_slot() -> DistroSlot {
-    load_persisted_state()
-        .ok()
-        .flatten()
-        .map_or(DistroSlot::INITIAL, |state| state.active_slot)
+fn active_slot() -> Result<DistroSlot, String> {
+    Ok(load_persisted_state()?.map_or(DistroSlot::INITIAL, |state| state.active_slot))
 }
 
 #[cfg(target_os = "windows")]
@@ -1123,15 +1176,17 @@ pub fn runtime_provision(app: AppHandle) -> RuntimeOperationResult {
 
 #[tauri::command(async)]
 pub fn runtime_start() -> RuntimeOperationResult {
-    with_lifecycle_lock(RuntimeOperation::Start, || {
-        platform_operation(RuntimeOperation::Start, &fixed_start_args())
+    with_lifecycle_lock(RuntimeOperation::Start, || match fixed_start_args() {
+        Ok(args) => platform_operation(RuntimeOperation::Start, &args),
+        Err(reason) => lifecycle_slot_unresolved(RuntimeOperation::Start, &reason),
     })
 }
 
 #[tauri::command(async)]
 pub fn runtime_stop() -> RuntimeOperationResult {
-    with_lifecycle_lock(RuntimeOperation::Stop, || {
-        platform_operation(RuntimeOperation::Stop, &fixed_stop_args())
+    with_lifecycle_lock(RuntimeOperation::Stop, || match fixed_stop_args() {
+        Ok(args) => platform_operation(RuntimeOperation::Stop, &args),
+        Err(reason) => lifecycle_slot_unresolved(RuntimeOperation::Stop, &reason),
     })
 }
 
@@ -1161,7 +1216,11 @@ pub fn runtime_repair() -> RuntimeOperationResult {
 
 #[cfg(target_os = "windows")]
 fn platform_logs(lines: Option<u16>) -> RuntimeLogsResult {
-    let args = runtime_log_args(active_slot(), lines);
+    let slot = match active_slot() {
+        Ok(slot) => slot,
+        Err(reason) => return logs_slot_unresolved(&reason),
+    };
+    let args = runtime_log_args(slot, lines);
     let capture = run_wsl(&args);
 
     if capture.outcome == CommandOutcome::Success {
