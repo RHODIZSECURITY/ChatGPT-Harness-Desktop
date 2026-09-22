@@ -1,7 +1,11 @@
 import { readFile } from 'node:fs/promises'
 import { expect, test } from 'vitest'
 
-const read = (relative: string) => readFile(new URL('../' + relative, import.meta.url), 'utf8')
+// Every assertion below is a source-text contract: `indexOf` offsets and `$`
+// anchors both change meaning under CRLF, and the Windows CI runner checks out
+// with CRLF. Normalise once, here, so no individual test has to remember.
+const read = async (relative: string) =>
+  (await readFile(new URL('../' + relative, import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
 
 test('Tauri shell is local-only with a non-null CSP and production devtools disabled', async () => {
   const config = JSON.parse(await read('src-tauri/tauri.conf.json'))
@@ -135,10 +139,87 @@ test('verify is a read-only exit-code probe and repair is bounded to one unit', 
   expect(core).toContain('pub fn classify_unit_probe(outcome: CommandOutcome)')
   expect(core).toContain('pub const UNPROBED_COMPONENTS: [&str; 5]')
   // Repair resets a latched failure and restarts the unit, nothing more.
-  expect(broker).toContain('WSL_REPAIR_RESET_ARGS')
-  expect(broker).toContain('WSL_REPAIR_RESTART_ARGS')
+  expect(broker).toContain('wsl_repair_reset_args(slot)')
+  expect(broker).toContain('wsl_repair_restart_args(slot)')
+  // Both spawns are aimed at the same slot, read once. Resolving the slot
+  // twice would let a swap land between them and restart a unit in a distro
+  // the reset never touched.
+  expect(broker).toContain('let slot = match active_slot() {')
   expect(core).toContain('"reset-failed"')
   expect(core).toContain('"restart"')
+})
+
+test('the update stages into the inactive slot and destroys nothing until the swap is durable', async () => {
+  const core = await read('src-tauri/broker-core/src/lib.rs')
+  const broker = await read('src-tauri/src/broker.rs')
+
+  // The slot to destroy is always derived from the slot that is live, never
+  // named. A vector that accepted the name to remove would be one
+  // argument-passing mistake away from unregistering the running runtime.
+  expect(core).toContain('pub const fn wsl_discard_inactive_args(active: DistroSlot)')
+  expect(core).toContain('["--unregister", active.other().distro_name()]')
+
+  // A first install is decided by the *presence* of state, not by inverting
+  // the active slot. `active_slot()` answers INITIAL when there is no state,
+  // so `.other()` would send a first install into the secondary slot and
+  // leave the primary one permanently empty.
+  expect(broker).toContain(
+    'let target_slot = previous_slot.map_or(DistroSlot::INITIAL, DistroSlot::other);',
+  )
+  // Asserted against code only: the comment above that derivation names the
+  // rejected form in order to explain it, and would otherwise trip this.
+  const brokerCode = broker
+    .split('\n')
+    .filter((line) => !line.trimStart().startsWith('//'))
+    .join('\n')
+  expect(brokerCode).not.toContain('active_slot().other()')
+
+  // The superseded distro is reclaimed only after the swap is on disk.
+  // Reclaiming first would destroy the runtime the operator is still using to
+  // serve a provision that can still fail.
+  const persistAt = broker.indexOf('persist_installed_release(&new_installed, target_slot)')
+  const reclaimAt = broker.indexOf('wsl_discard_inactive_args(target_slot)')
+  expect(persistAt).toBeGreaterThan(-1)
+  expect(reclaimAt).toBeGreaterThan(persistAt)
+})
+
+test('every distro-scoped provisioning step names the staged slot, including the Docker install', async () => {
+  const core = await read('src-tauri/broker-core/src/lib.rs')
+  const broker = await read('src-tauri/src/broker.rs')
+
+  // Provisioning runs four commands against a distro. All four take the slot
+  // as a parameter, so none of them can be aimed at the live release by
+  // omission -- which is what the Docker install did while it named the
+  // primary distro unconditionally.
+  for (const call of [
+    'wsl_import_args(target_slot,',
+    'wsl_write_conf_args(target_slot)',
+    'wsl_terminate_args(target_slot)',
+    'wsl_docker_provision_args(slot)',
+  ]) {
+    expect(broker).toContain(call)
+  }
+  // The Docker vector is reached through a helper, so the staged slot has to
+  // arrive at that helper too.
+  expect(broker).toContain('provision_docker_in_distro(target_slot)')
+
+  // The Docker install is the one step that runs as root inside the distro,
+  // so aiming it at the wrong slot mutates the running release rather than
+  // merely failing.
+  expect(core).toContain('pub fn wsl_docker_provision_args(slot: DistroSlot)')
+  expect(core).toContain('slot.distro_name(),')
+  expect(broker).not.toContain('MANAGED_DISTRO_NAME')
+
+  // The script is a compile-time constant with nothing interpolated into it.
+  // A format! or a push_str here would turn the one shell in the codebase
+  // into an injection surface.
+  expect(core).toContain('pub const DOCKER_PROVISION_SCRIPT: &str')
+  const scriptStart = core.indexOf('pub const DOCKER_PROVISION_SCRIPT')
+  const scriptEnd = core.indexOf('"#;', scriptStart)
+  expect(scriptEnd).toBeGreaterThan(scriptStart)
+  const script = core.slice(scriptStart, scriptEnd)
+  expect(script).not.toContain('{}')
+  expect(script).not.toContain('format!')
 })
 
 test('log redaction matches credential prefixes only at token boundaries', async () => {
@@ -345,4 +426,222 @@ test('manifest signature verification is enforced before any parse', async () =>
   const reExportBlock = reExportMatch![1]
   expect(reExportBlock).toContain('verify_release_manifest')
   expect(reExportBlock).not.toContain('verify_manifest_with_key')
+})
+
+// The provisioning pipeline draws security conclusions from the order its
+// steps run in and from the difference between "no state" and "unreadable
+// state". Both are properties of control flow that no type enforces, so pin
+// them here: each assertion below corresponds to a way the pipeline has
+// already been wrong once.
+test('provisioning fails closed on unreadable state and installs before it records success', async () => {
+  const broker = await read('src-tauri/src/broker.rs')
+
+  // Only a missing file may read as "nothing installed". Any other read or
+  // parse failure has to surface, because `decide_update` takes the absence
+  // of state as the absence of an anti-rollback floor -- so a swallowed
+  // error would let an arbitrarily old signed release install.
+  expect(broker).toContain('fn load_persisted_state() -> Result<Option<PersistedState>, String>')
+  expect(broker).toContain('Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None)')
+
+  // ...and the caller has to act on that error rather than defaulting. Assert
+  // on the span between the load and the decision: a `Failed` return has to
+  // sit inside it, which is what stops provisioning before a floor-less
+  // decision can be made.
+  const loadAt = broker.indexOf('match load_persisted_state() {')
+  const decideAt = broker.indexOf('decide_update(&manifest, installed)')
+  expect(loadAt).toBeGreaterThan(-1)
+  expect(decideAt).toBeGreaterThan(loadAt)
+  expect(broker.slice(loadAt, decideAt)).toContain('state: OperationState::Failed')
+
+  // Docker is installed before state is persisted. Persisting first would
+  // record a release as installed while its runtime is still unprovisioned,
+  // and the recorded sequence would raise the rollback floor on behalf of a
+  // distro with no working Docker in it -- permanently, since the floor only
+  // ever rises.
+  const dockerAt = broker.indexOf('ProvisioningStep::InstallDocker')
+  const persistAt = broker.indexOf('ProvisioningStep::PersistState')
+  expect(dockerAt).toBeGreaterThan(-1)
+  expect(persistAt).toBeGreaterThan(dockerAt)
+
+  // Every broker-owned path hangs off one fallible accessor. Unwrapping the
+  // variable instead panics inside a Tauri command handler, where the
+  // renderer gets a dropped IPC call and no reason for it.
+  expect(broker).toContain('fn local_app_data() -> Result<PathBuf, String>')
+  expect(broker).not.toMatch(/var_os\("LOCALAPPDATA"\)\s*\)?\s*\.\s*unwrap\(\)/)
+  expect(broker).not.toMatch(/var_os\("LOCALAPPDATA"\)\.expect\(/)
+})
+
+// Every byte the broker pulls off the network arrives before anything has
+// verified it, and arrives at a length the server chooses. Both facts have to
+// be handled at the read itself: a ceiling checked afterwards runs only once
+// the body is already in memory, and a request with no deadline never reaches
+// the check at all. Neither is expressible as a type, so pin them here.
+test('network reads are bounded in size and time before anything verifies them', async () => {
+  const broker = await read('src-tauri/src/broker.rs')
+
+  // No client without deadlines. `Client::new()` is the constructor that
+  // gives you one, so its absence is what makes the builders below the only
+  // way to get a client at all.
+  expect(broker).not.toContain('reqwest::blocking::Client::new()')
+
+  // Each builder is checked on its own body. Asserting the connect deadline
+  // appears somewhere in the file would pass with one client still missing
+  // it, which is exactly the shape this has to rule out.
+  const clientBody = (name: string) => {
+    const at = broker.indexOf(`fn ${name}() -> Result<reqwest::blocking::Client, String> {`)
+    expect(at, `${name} is missing`).toBeGreaterThan(-1)
+    const end = broker.indexOf('\n}', at)
+    expect(end).toBeGreaterThan(at)
+    return broker.slice(at, end)
+  }
+  const manifestClient = clientBody('manifest_client')
+  const rootfsClient = clientBody('rootfs_client')
+  for (const body of [manifestClient, rootfsClient]) {
+    expect(body).toContain('.connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))')
+  }
+
+  // The manifest and its signature are small and fixed-size, so they also
+  // carry a whole-request deadline. The rootfs deliberately does not: a total
+  // timeout there would cap how large a legitimate rootfs may be, and
+  // reqwest's blocking builder offers no per-read inactivity timeout to use
+  // in its place.
+  expect(manifestClient).toContain('.timeout(Duration::from_secs(MANIFEST_HTTP_TIMEOUT_SECS))')
+  expect(rootfsClient).not.toMatch(/\.timeout\(/)
+
+  // The manifest and signature bodies are bounded where they are read, not
+  // where they are checked. `verify_release_manifest` does enforce
+  // MAX_MANIFEST_BYTES, but only on a Vec that is already in memory -- an
+  // endless response body exhausts RAM before it ever runs.
+  expect(broker).toContain('read_body_bounded(manifest_resp, MAX_MANIFEST_BYTES, "manifest")')
+  expect(broker).toContain('read_body_bounded(sig_resp, MANIFEST_SIGNATURE_LEN, "signature")')
+
+  // ...and that helper refuses rather than truncates. A prefix of a signed
+  // document is not a shorter signed document.
+  const bodyBoundedAt = broker.indexOf('fn read_body_bounded(')
+  expect(bodyBoundedAt).toBeGreaterThan(-1)
+  expect(broker.slice(bodyBoundedAt, bodyBoundedAt + 600)).toContain('exceeds its {limit}-byte ceiling')
+
+  // The rootfs is streamed to disk under a ceiling, never buffered whole. The
+  // digest comparison cannot stand in for either: it runs only after the
+  // write has finished.
+  expect(broker).toContain('io::copy(&mut (&mut resp).take(MAX_ROOTFS_BYTES + 1), &mut file)')
+  expect(broker).not.toMatch(/resp\s*\n?\s*\.bytes\(\)/)
+
+  // Hitting the ceiling removes the partial file before returning. Scoped to
+  // the ceiling branch itself: the digest-mismatch branch further down does
+  // its own cleanup, and a slice wide enough to include it would pass on that
+  // one alone.
+  const ceilingAt = broker.indexOf('if copied > MAX_ROOTFS_BYTES {')
+  expect(ceilingAt).toBeGreaterThan(-1)
+  const ceilingBranch = broker.slice(ceilingAt, broker.indexOf('return Err(', ceilingAt))
+  expect(ceilingBranch).toContain('fs::remove_file(&tarball_path)')
+})
+
+// The provisioning pipeline's safety content is its order. Verification sits
+// between the bytes arriving and anything being done with them, so every
+// effect that costs something -- a multi-hundred-megabyte download, a distro
+// import, a package install as root -- has to sit below it. Nothing in the
+// type system says so: the guarantee is that the statements appear in that
+// sequence inside one function, which is exactly the kind of thing a later
+// edit reorders without noticing.
+test('nothing is downloaded or imported before the manifest signature verifies', async () => {
+  const broker = await read('src-tauri/src/broker.rs')
+
+  // The twelve steps run in the order the enum declares them. Emitting them
+  // out of order would not break provisioning, which is the problem: the UI
+  // would narrate a sequence the broker is not performing, and the progress
+  // events are the only window an operator has into a pipeline that
+  // otherwise runs silently for minutes.
+  const ORDER = [
+    'FetchManifest',
+    'Verify',
+    'Parse',
+    'Decide',
+    'ResolveBundle',
+    'DownloadRootfs',
+    'VerifyDigest',
+    'ImportWsl',
+    'ConfigureSystemd',
+    'RestartWsl',
+    'InstallDocker',
+    'PersistState',
+  ]
+  // The trailing comma matters: `ProvisioningStep::Verify` is a prefix of
+  // `ProvisioningStep::VerifyDigest`, and matching the prefix would silently
+  // compare a step against itself.
+  const positions = ORDER.map((step) => {
+    const at = broker.indexOf(`ProvisioningStep::${step},`)
+    expect(at, `${step} is never emitted`).toBeGreaterThan(-1)
+    return at
+  })
+  for (let i = 1; i < positions.length; i += 1) {
+    expect(positions[i]!, `${ORDER[i]} must be emitted after ${ORDER[i - 1]}`).toBeGreaterThan(
+      positions[i - 1]!,
+    )
+  }
+
+  // The verify call, not the import at the top of the file: `use ... {
+  // verify_release_manifest, ... }` sits above every line below and would
+  // make each of these comparisons trivially true.
+  const verifyAt = broker.indexOf('match verify_release_manifest(&manifest_bytes, &signature_bytes)')
+  expect(verifyAt).toBeGreaterThan(-1)
+
+  // Everything that acts on the manifest's contents happens below the
+  // verification of those contents. A prefetch added "while we verify", or a
+  // bundle resolved early to show the user a size, would put an
+  // attacker-chosen URL in front of the signature check.
+  for (const effect of [
+    'download_rootfs(&bundle)',
+    'wsl_import_args(target_slot,',
+    'wsl_write_conf_args(target_slot)',
+    'wsl_terminate_args(target_slot)',
+    'provision_docker_in_distro(target_slot)',
+    'wsl_discard_inactive_args(',
+  ]) {
+    const at = broker.indexOf(effect)
+    expect(at, `${effect} is missing`).toBeGreaterThan(-1)
+    expect(at, `${effect} must not run before the signature verifies`).toBeGreaterThan(verifyAt)
+  }
+
+  // A failed verification returns; it does not fall through with a warning.
+  // Scoped to the span between the verify and the next step so a `Failed`
+  // return belonging to some later stage cannot satisfy it.
+  const verifyBlock = broker.slice(verifyAt, broker.indexOf('ProvisioningStep::Parse,'))
+  expect(verifyBlock).toContain('state: OperationState::Failed')
+  expect(verifyBlock).toContain('release manifest verification failed')
+})
+
+// The Rust enum is the publisher and the TypeScript union is the subscriber,
+// and serde's rename rule is the only thing connecting them. Nothing fails to
+// compile when they drift: Rust emits a step the renderer's union does not
+// name, or the renderer offers a case that nothing will ever send, and the
+// progress display is wrong in a way that only shows up during a real
+// provision on a real Windows machine.
+test('the Rust provisioning steps and the renderer union name the same steps in the same order', async () => {
+  const broker = await read('src-tauri/src/broker.rs')
+  const types = await read('src/runtime/types.ts')
+
+  const enumAt = broker.indexOf('pub enum ProvisioningStep {')
+  expect(enumAt).toBeGreaterThan(-1)
+  const enumBody = broker.slice(enumAt, broker.indexOf('\n}', enumAt))
+  const declared = [...enumBody.matchAll(/^ {4}(\w+),$/gm)].map((m) => m[1]!)
+  expect(declared.length).toBeGreaterThan(0)
+
+  // The wire names are derived from the variants rather than written out a
+  // second time, so this compares the two languages instead of comparing two
+  // copies of the same hand-written list.
+  expect(broker.slice(Math.max(0, enumAt - 200), enumAt)).toContain(
+    '#[serde(rename_all = "snake_case")]',
+  )
+  const wire = declared.map((variant) =>
+    variant.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase(),
+  )
+
+  const unionAt = types.indexOf('export type ProvisioningStep =')
+  expect(unionAt).toBeGreaterThan(-1)
+  const unionEnd = types.indexOf('\n\n', unionAt)
+  expect(unionEnd).toBeGreaterThan(unionAt)
+  const union = [...types.slice(unionAt, unionEnd).matchAll(/'([a-z0-9_]+)'/g)].map((m) => m[1]!)
+
+  expect(union).toEqual(wire)
 })

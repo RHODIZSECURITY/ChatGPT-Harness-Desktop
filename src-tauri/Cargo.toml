@@ -25,3 +25,10 @@ tauri-build = { version = "=2.6.3" }
 rhodiz-harness-broker-core = { path = "broker-core" }
 tauri = { version = "=2.11.5" }
 wait-timeout = "=0.2.1"
+reqwest = { version = "=0.12", features = ["blocking"] }
+sha2 = "=0.10"
+hex = "=0.4"
+# Pinned to the same versions broker-core resolves, so adding them here adds
+# no new entries to the lockfile that `cargo audit` gates on in CI.
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"

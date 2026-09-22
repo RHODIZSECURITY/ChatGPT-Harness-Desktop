@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "release_id": "example-dev-0.2.0",
+  "release_sequence" : 2,
+  "channel": "dev",
+  "published_at": "2026-09-18T00:00:00Z",
+  "source_commit": "2fe077db8ebbee301e6d38fd6ff3f550050c1dc4",
+  "desktop": {
+    "version": "0.1.0",
+    "tauri_update_version": "0.1.0",
+    "bootstrap_version": "0.1.0",
+    "minimum_windows_build": 22000
+  },
+  "runtime": {
+    "bundle_version": "0.2.0",
+    "core_version": "0.2.0",
+    "core_contract_version": 1,
+    "state_schema_version": 4,
+    "migration_version": 0,
+    "wsl_distro_version": "0.1.0",
+    "compose_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "images": {
+      "core": {
+        "repository": "rhodiz/chatgpt-arnes",
+        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "strands": {
+        "repository": "rhodiz/strands-agent-provider",
+        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "public": {
+        "repository": "rhodiz/public-capability-provider",
+        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "route": {
+        "repository": "ghcr.io/rhodizsecurity/route-image-placeholder",
+        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000003"
+      },
+      "memory": {
+        "repository": "ghcr.io/rhodizsecurity/memory-image-placeholder",
+        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000004"
+      }
+    }
+  },
+  "compatibility": {
+    "minimum_desktop_version": "0.1.0",
+    "minimum_bootstrap_version": "0.1.0",
+    "minimum_core_contract_version": 1,
+    "maximum_core_contract_version": 1,
+    "minimum_rollback_sequence": 1
+  },
+  "providers": {
+    "strands-agent-provider": {
+      "version": "0.2.0",
+      "contract_version": 1
+    },
+    "public-capability-provider": {
+      "version": "0.2.0",
+      "contract_version": 1
+    }
+  }
+}

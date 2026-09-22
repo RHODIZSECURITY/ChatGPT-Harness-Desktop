@@ -11,6 +11,13 @@ on:
 permissions:
   contents: read
 
+env:
+  # A real Windows 11 capture now lives in evidence/windows/, so its absence is
+  # a regression rather than a known gap: deleting the capture must turn CI red
+  # instead of quietly restoring "no evidence, no opinion". Left unset locally,
+  # where a contributor with no captures is not doing anything wrong.
+  RHODIZ_REQUIRE_WSL_EVIDENCE: '1'
+
 concurrency:
   group: desktop-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -84,6 +91,36 @@ jobs:
 
       - name: Install npm dependencies
         run: npm ci --no-audit --no-fund
+
+      - name: Parse and smoke-test the WSL evidence probe
+        shell: pwsh
+        run: |
+          $script = 'scripts/windows-evidence/probe-wsl.ps1'
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path $script), [ref]$null, [ref]$errors)
+          if ($errors) {
+            $errors | ForEach-Object { Write-Host $_ }
+            throw "$script does not parse"
+          }
+
+          # Execute it for real. This runner has no WSL install, so the capture
+          # exercises the absent/not-probeable route end to end; the point is
+          # that the script runs on Windows and emits a well-formed capture
+          # before an operator is asked to run it on their own machine.
+          & $script -Label ci-smoke -OutFile "$env:RUNNER_TEMP/wsl-probe-ci-smoke.json"
+
+          $capture = Get-Content "$env:RUNNER_TEMP/wsl-probe-ci-smoke.json" -Raw | ConvertFrom-Json
+          if ($capture.schema -ne 'rhodiz.harness.windows-evidence/wsl-probe/1') {
+            throw "capture carries an unexpected schema: $($capture.schema)"
+          }
+
+          # Feed it to the replay test, proving the Windows producer and the
+          # Rust consumer agree on the format. The capture stays in the runner
+          # workspace: it is a smoke test, never committed as host evidence.
+          Copy-Item "$env:RUNNER_TEMP/wsl-probe-ci-smoke.json" evidence/windows/
+          cargo test --manifest-path src-tauri/Cargo.toml -p rhodiz-harness-broker-core --test wsl_evidence_replay -- --nocapture
+          Remove-Item evidence/windows/wsl-probe-ci-smoke.json
 
       - name: Verify Windows stack
         run: npm run verify:windows

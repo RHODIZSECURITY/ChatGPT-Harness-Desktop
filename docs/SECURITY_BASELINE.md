@@ -32,6 +32,22 @@ threads bounded to `MAX_CAPTURE_BYTES`. Each call is bounded by
 `COMMAND_TIMEOUT_SECS`; on expiry the child is killed and the outcome is
 reported as `timed_out`, never as success.
 
+Every distro-scoped vector names a **slot** rather than a distro. Two managed
+distros can exist at once while an update is staged, and which one is serving is
+a fact that lives in the broker's state file, not in the binary. It is read per
+command rather than cached at startup, so a swap by a concurrent provision is
+picked up by the next command instead of being shadowed by a stale value.
+
+An **unreadable state file is refused, not defaulted**. Before staging existed,
+reading a corrupt file as the primary slot could not name the wrong distro
+because no other distro existed; now it can, and the wrong guess would start,
+restart or read the logs of a runtime the operator is not running. There is no
+safe default, so all five lifecycle commands carry the failure out to the
+renderer, each in its own result shape — a failed operation, an unhealthy
+verify with everything marked unprobed, or an empty log read that is explicitly
+not a truncation. Each says why, because a refusal an operator cannot act on is
+barely better than a wrong answer.
+
 - `runtime_status` — `wsl.exe --status`; classified ready, stopped, missing or unavailable.
 - `runtime_start` / `runtime_stop` — fixed `systemctl start|stop rhodiz-harness-bootstrap.service`
   inside the managed distro. Both are serialized; a concurrent attempt returns
@@ -76,16 +92,71 @@ reported as `timed_out`, never as success.
   *other* non-zero exit as "distribution unreachable". This mapping has not
   been exercised against a real `wsl.exe`; confirming it belongs to Windows
   certification, and the broker-core constant documents it as an assumption.
-- `runtime_provision` — **fails closed on every branch**. It still creates,
-  downloads and installs nothing, because signed runtime manifest verification
-  does not exist yet, and provisioning by arbitrary URL is deliberately not
-  implemented. What it now does is *diagnose* before refusing, under the
-  lifecycle lock, so the call site is already correct for the day it mutates.
-  It runs the fixed status probe and, **only if that probe proves `wsl.exe`
-  answers at all**, a second fixed `wsl.exe --version`. Gating the second spawn
-  behind the first keeps an absent or wedged WSL to one `COMMAND_TIMEOUT_SECS`
-  rather than two, and the preflight ignores the version on those branches
-  anyway. The four states are distinguished **in the `detail` string only** — every branch returns `OperationState::Blocked` because the signed manifest gate is the ultimate barrier (the verification primitive behind that gate now exists — see "Release manifest signature verification" below — but no signing key is pinned, so it refuses everything). The states are: WSL absent, WSL unprobeable, WSL present but older than the pinned minimum, and WSL sufficient — where the only remaining obstacle is the manifest gate, so that branch defers to the same refusal message rather than restating it.
+- `runtime_provision` — **the one mutating pipeline, and the only code in the
+  broker that opens a network connection.** It no longer merely diagnoses and
+  refuses. It runs the fixed status probe and, **only if that probe proves
+  `wsl.exe` answers at all**, a second fixed `wsl.exe --version`. Gating the
+  second spawn behind the first keeps an absent or wedged WSL to one
+  `COMMAND_TIMEOUT_SECS` rather than two. If that preflight blocks, nothing
+  further runs and no connection is opened; the four blocking states are
+  distinguished **in the `detail` string only**: WSL absent, WSL unprobeable,
+  WSL present but older than the pinned minimum, and WSL sufficient.
+
+  Past the preflight it fetches `release.json` and `release.json.sig` from
+  `RHODIZ_UPDATE_URL`, verifies the signature, parses the manifest, downloads
+  the rootfs, compares a digest, imports the distro, writes `wsl.conf`,
+  terminates so systemd boots, installs Docker inside the distro, and only
+  then records the release. Failures along that path return
+  `OperationState::Failed`, not `Blocked`.
+
+  **What still stops it in a shipped build, and what does not.** No release
+  installs today, but not because the verification code is missing — it exists
+  and runs (see "Release manifest signature verification" below). It stops
+  because `MANIFEST_PUBLIC_KEY` is pinned to `None`, so
+  `verify_release_manifest` answers `NoTrustAnchor` and refuses every manifest,
+  genuine or not. That is a narrower guarantee than "installs nothing" and
+  should be read as such: the barrier is one constant, and pinning a key is
+  what removes it.
+
+  **The manifest fetch happens before that refusal.** Verification cannot run
+  on bytes it does not have, so a build with `RHODIZ_UPDATE_URL` set does make
+  an outbound request to that host and read up to `MAX_MANIFEST_BYTES` from it
+  before refusing. With the variable unset — the default — provisioning fails
+  at the first step and opens no connection at all.
+
+  **The state write is the swap.** An update imports into the distro slot that
+  is *not* serving, so the runtime the operator is using keeps running through
+  the whole pipeline. The write that records the new release also records its
+  slot, and that single write is the moment the staged distro becomes live:
+  everything before it leaves the operator running exactly what they were
+  running, and a failure anywhere above it changes nothing they can observe.
+  It comes last for a second reason too — persisting first would record a
+  release as installed while its runtime was still unprovisioned, and because
+  the anti-rollback floor only ever rises, that record would raise the floor
+  permanently on behalf of a broken distro.
+
+  The target slot is derived from **whether any state exists**, not from
+  inverting the active slot. Those two agree everywhere except the case that
+  matters: with no state file nothing is serving, `active_slot()` answers the
+  primary slot for want of anything else to say, and inverting it would send a
+  first install into the secondary slot and leave the primary permanently
+  empty.
+
+  Every distro-scoped step in the pipeline — import, `wsl.conf`, terminate and
+  the Docker install — takes the slot as a parameter, so none can reach the
+  live release by omission. The Docker install is the one with the most to
+  lose: it runs as root inside the distro, so naming the primary distro
+  unconditionally would have mutated the release still in use in order to
+  provision its replacement.
+
+  **Reclaim happens only after the swap is durable**, and its failure does not
+  fail a provision that has already succeeded — the leftover distro is named in
+  the success `detail` instead, because a distro the broker meant to remove and
+  did not is something the operator has to be able to see. One case is recorded
+  rather than closed: a *first* install that fails after its import leaves a
+  distro and no state file, so a retry meets a name collision that the update
+  path clears. Clearing it would need a vector that names a slot directly,
+  which is the inversion `wsl_discard_inactive_args` exists to prevent.
 
   **The one place the broker parses stdout for anything but logs.**
   `wsl.exe --version` writes UTF-16LE, so the version cannot be read from an
@@ -152,6 +223,18 @@ from beside the manifest or from any file the update path can replace: an
 attacker able to swap the manifest could then swap the key that authenticates
 it, and the signature would verify perfectly against the attacker's own key.
 
+**What that means for end-to-end evidence.** The provisioning pipeline has
+twelve steps and verification is the third. With no anchor pinned, the pipeline
+cannot execute past that third step on any host, including Windows: there is no
+manifest it will accept, so nothing downloads, nothing imports, nothing is
+configured. An end-to-end run against a local update server is therefore able
+to certify exactly one thing today — that the refusal happens, and happens
+before any byte of rootfs is fetched and before `wsl.exe` is asked to import
+anything. That property is worth certifying and is pinned by a contract test
+below. The remaining nine steps are certified only by their unit and argument
+tests until a signing key exists; describing them as end-to-end verified would
+be describing a run that cannot occur.
+
 **Test evidence: 13 tests, anchored on external authority.** Two RFC 8032
 section 7.1 vectors are used, re-derived from an independent implementation —
 signing a fixture with the same library that verifies it would prove only
@@ -171,6 +254,64 @@ on Linux — but nothing here has verified a *real* release manifest, because no
 exists. Manifest schema, transport, anti-rollback (`release_sequence`) and digest
 pinning are separate obligations that this module does not implement and must not
 be read as covering.
+
+## Update channel — what the broker trusts about where bytes come from
+
+The broker has no compiled-in production update URL. The base comes from the
+`RHODIZ_UPDATE_URL` environment variable, with **no default**: unset, provisioning
+fails before any socket is opened. That is the shipping configuration today, so a
+default build makes no outbound connection at all.
+
+Three URLs are derived from that base by string concatenation — `/release.json`,
+`/release.json.sig` and `/rootfs.tar.gz`. The following properties of that
+arrangement are gaps, recorded here because they are not visible from the code
+that reads them:
+
+- **The scheme is not constrained.** Nothing rejects `http://`, a bare host or a
+  path that is not a URL at all; whatever the variable holds is handed to
+  `reqwest`. This is deliberate for now — the end-to-end test in the plan serves
+  a fixture manifest from a local HTTP server, and a hard `https://` check would
+  make that test impossible to write. It is defensible only because integrity is
+  supposed to rest on the detached signature rather than on the transport, and
+  that argument is **not yet valid in practice**: with `MANIFEST_PUBLIC_KEY` at
+  `None`, nothing is authenticated, so today the only thing preventing a hostile
+  update is that every manifest is refused. A scheme constraint belongs in the
+  same change that pins the key, not after it.
+- **The tarball URL is a producer-side convention, not a signed field.** The
+  manifest schema carries no URL for the rootfs; `download_rootfs` assumes
+  `rootfs.tar.gz` sits beside `release.json`. So the location of the largest
+  artefact in the pipeline is not covered by the signature.
+- **The base is read from the environment a second time** for the rootfs fetch,
+  independently of the read that located the manifest. Nothing signed ties the
+  two fetches together.
+- **No rootfs digest is verified.** `download_rootfs` compares the tarball hash
+  against `compose_sha256`, which is the digest of the *compose file*. The schema
+  has no `rootfs_sha256` field to compare against. The comparison is left in
+  place so the gap stays visible in the code; closing it is a change to what
+  counts as a valid signed manifest, not a change to the download path.
+- **The provisioned runtime installs packages the manifest never names.** After
+  the rootfs is imported, `DOCKER_PROVISION_SCRIPT` adds Docker's own apt
+  repository inside the distro and installs `docker-ce` and the Compose plugin
+  from it. Those packages are whatever that repository serves at provisioning
+  time — unpinned, unversioned and outside the signed manifest, which covers the
+  rootfs and nothing past it. Two machines provisioned from the same signed
+  release can therefore end up with different container engines. Closing this
+  means pinning the versions or shipping them inside the rootfs; it is not
+  closed by anything in the signature path.
+- **The rootfs is bounded only by a sanity ceiling.** `MAX_ROOTFS_BYTES` (8 GiB)
+  exists so a server that streams without end is refused rather than filling the
+  volume. It is an order of magnitude above any plausible rootfs and expresses no
+  expectation about size, because the manifest declares none.
+
+What the transport path *does* enforce is bounded reads. The manifest and its
+signature are read through a ceiling applied at the read itself, not after
+buffering, and both carry a connect deadline and a whole-request deadline —
+safe for them because both are small and fixed-size. The rootfs carries a
+connect deadline only: a whole-request deadline would cap how large a rootfs may
+legitimately be or how slow a link may be, and the blocking client exposes no
+per-read inactivity timeout to use instead. **A server that trickles bytes
+indefinitely therefore still stalls provisioning**, bounded only by the ceiling
+above and interruptible only by closing the app.
 
 ## Lifecycle exclusion
 
@@ -226,10 +367,29 @@ The five Windows warnings are upstream maintenance warnings, not known vulnerabi
 ## Local certification evidence
 
 - Oxlint: 0 warnings / 0 errors.
-- Vitest: 20/20 PASS.
-- Executable TypeScript/React coverage: 100% statements, branches, functions and lines.
+- Vitest: 27/27 PASS.
+- Executable TypeScript/React coverage: 100% statements, branches, functions and
+  lines (24/24, 10/10, 14/14, 22/22). The previous checkpoint recorded 91.66%
+  statements with `src/runtime/bridge.ts:68-69` uncovered — the callback
+  `listenProvisioningProgress` hands to Tauri's `listen`. That gap is closed by
+  a test that mocks `listen`, drives the captured handler directly, and asserts
+  the three things the renderer depends on: the event name matches the one the
+  broker emits, the payload arrives unwrapped rather than inside the Tauri
+  envelope, and the unlisten handle is passed through so a component unmounting
+  mid-provision can detach.
 - Production renderer build: PASS.
-- Rust broker-core: 42/42 PASS.
+- Rust broker-core: 87 unit + 2 integration = 89/89 PASS, 0 doc-tests.
+- Two contract tests pin the pipeline's order, which is where its safety lives
+  and which no type enforces. The first asserts that the twelve progress steps
+  are emitted in sequence and that every expensive or destructive effect — the
+  rootfs download, the distro import, the `wsl.conf` write, the terminate, the
+  root Docker install, the discard of the inactive slot — appears below the
+  signature check, so a prefetch or an early bundle resolution cannot be added
+  in front of it. The second derives the wire names from the Rust enum under
+  serde's rename rule and compares them to the renderer's union, because
+  nothing fails to compile when a step is added on one side only: the broker
+  would emit a step the UI cannot name, and the operator's only window into a
+  pipeline that otherwise runs silently for minutes would be wrong.
 - `cargo fmt --check`: PASS.
 - Clippy with `-D warnings`: PASS.
 - `npm run verify:portable`: PASS end to end.
@@ -254,9 +414,21 @@ What this checkpoint does run, and passes with zero errors and zero warnings:
 
 - `cargo check --target x86_64-pc-windows-msvc` — the real Windows target,
   including `broker.rs` and the Tauri ACL build script, which validates the
-  capability manifest against the actual permission set. This required
-  `llvm-rc` (from a user-space LLVM 20 installation) for the Windows resource
-  step; it compiles every `#[cfg(windows)]` path.
+  capability manifest against the actual permission set. It compiles every
+  `#[cfg(windows)]` path.
+
+  **How the Windows resource step was satisfied, and what that costs.** The
+  build script (`tauri-winres`) shells out to `llvm-rc`, which is not installed
+  in this environment. An earlier checkpoint of this document said the step used
+  a user-space LLVM 20 installation; on this checkpoint that is not true, and
+  the difference is worth stating rather than quietly inheriting. What ran was a
+  local stub on `PATH`, outside the repository, which parses `/FO` and truncates
+  the named output file to zero bytes. It is sound *only* for a type check:
+  `cargo check` never links, so the `.res` is produced and never read. It means
+  the version block, icon and manifest resources were **not** compiled, and no
+  claim about them is supported by this run. A real resource compiler is needed
+  before the packaging path can be certified — which is Windows-host work in any
+  case.
 - `cargo clippy --target x86_64-pc-windows-msvc -- -D warnings` over the whole
   workspace. This caught one real finding on the lifecycle lock file
   (`create` without explicit truncate behaviour, fixed by `.truncate(false)`)
@@ -264,12 +436,20 @@ What this checkpoint does run, and passes with zero errors and zero warnings:
 - `cargo clippy -p rhodiz-harness-broker-core --all-targets -- -D warnings` on
   the host, covering all pure logic including the new verify classification.
 
-### Windows CI result on this commit
+### Windows CI result, and which commit it actually covers
 
 The `Windows Tauri check` job ran `npm run verify:windows` on a native
-`windows-latest` runner for this exact commit (workflow run 35553702789, event
-`pull_request`) and **passed**. The script is a `&&` chain, so `verify:portable`,
-`check:tauri` and `clippy:tauri` all succeeded there; `clippy:tauri` with
+`windows-latest` runner for commit `85dd1e0` of this branch (workflow runs
+35680565349 `push` and 35680567833 `pull_request`) and **passed**.
+
+That SHA is named rather than described as "this commit" on purpose. A CI
+result belongs to the commit it ran against and to no other, so a phrase that
+follows the checkout is a claim that silently becomes false on the next push.
+Any commit after `85dd1e0` is covered by this section only once its own run is
+green and this paragraph names it — including the commit that carries this
+paragraph, whose own run had not started when it was written.
+
+The script is a `&&` chain, so `verify:portable`, `check:tauri` and `clippy:tauri` all succeeded there; `clippy:tauri` with
 `-D warnings` reported zero errors and zero warnings over both
 `rhodiz-harness-desktop` and `rhodiz-harness-broker-core`. `broker.rs` is
 therefore compiled and lint-clean against a real MSVC toolchain, which the
@@ -303,9 +483,10 @@ certification:
 1. **Flujo inquebrantable**: `npm run verify:portable` green end to end on the
    candidate SHA, plus `check:tauri` and `clippy:tauri` with warnings denied —
    the gate that actually compiles `broker.rs`.
-   Current status: ✅ green (last full run: 2026-09-21, SHA `0559336`).
+   Current status: ✅ green — last full run on SHA `85dd1e0`.
 2. **CI verde**: all checks green on the candidate SHA for every PR in the
-   stack. Current status: ✅ #1–#5 all green on their current heads.
+   stack. Current status: ✅ PR #7 green on `85dd1e0`, its current head at the
+   time of writing.
 3. **E2E verde**: plan section 10 tasks (clean Windows 11 host, WSL
    absent/present/outdated paths, reboot recovery, Docker failure, digests,
    loopback under VPN, rollback, uninstall, installer + signing, full Windows

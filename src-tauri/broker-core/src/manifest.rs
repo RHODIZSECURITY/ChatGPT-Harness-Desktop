@@ -107,6 +107,18 @@ impl ManifestVerifyError {
     }
 }
 
+/// Delegates to [`ManifestVerifyError::message`] so the operator-facing prose has exactly
+/// one definition. Writing it twice would let the two drift, and the coarseness of that prose is a security
+/// property: it says what was refused, never how far verification got. A
+/// second rendering is a second chance to leak that.
+impl std::fmt::Display for ManifestVerifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str((*self).message())
+    }
+}
+
+impl std::error::Error for ManifestVerifyError {}
+
 /// A borrow of manifest bytes whose signature has been verified.
 ///
 /// The field is private and no constructor is exported, so the only way to
@@ -193,6 +205,24 @@ pub fn verify_release_manifest<'a>(
         return Err(ManifestVerifyError::NoTrustAnchor);
     };
     verify_manifest_with_key(&public_key, manifest, signature)
+}
+
+/// Verification for the parser's tests, and nothing else.
+///
+/// `cfg(test)` so it does not exist in any build that ships. The parser in
+/// `release` must be reachable only from verified bytes, which means its
+/// tests need to *perform* a verification rather than fabricate a
+/// [`VerifiedManifestBytes`] — fabricating one would test serde and quietly
+/// skip the property the module exists to hold. This keeps the production
+/// surface exactly as the module doc describes it: outside this module, in a
+/// shipped build, [`verify_release_manifest`] remains the only way in.
+#[cfg(test)]
+pub(crate) fn verify_for_tests<'a>(
+    public_key: &[u8],
+    manifest: &'a [u8],
+    signature: &[u8],
+) -> Result<VerifiedManifestBytes<'a>, ManifestVerifyError> {
+    verify_manifest_with_key(public_key, manifest, signature)
 }
 
 #[cfg(test)]
@@ -527,5 +557,112 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- Cross-language contract, against the Core signer ----
+    //
+    // The Core repository (ChatGPT-Arnes) signs release manifests; this crate
+    // verifies them. Until now each side was exercised only against fixtures
+    // it wrote itself, which proves each is self-consistent and nothing at all
+    // about whether the two agree. These vectors come from Core's
+    // config/release-manifest-signature-vectors.json, and were re-derived here
+    // from an independent Ed25519 implementation before being written down —
+    // the same reason the RFC 8032 vectors above are external.
+    //
+    // The signing key is deliberately absent. Verification needs only the
+    // public half, and a private key committed to a repository is a credential
+    // whatever the comment next to it claims.
+    const VECTOR_PUBLIC_KEY: &str =
+        "b08576455981a5977a8d60a0b021d65275811f17e70e36dba45521941f7e8d33";
+    const VECTOR_SIGNATURE: &str = concat!(
+        "aff72b1514903969fc30eab0e68c871c7953991516b8cdf0e4e81e459653d450",
+        "840588f79bbb8d78976282ed76eafc742ed80a7ce51047d6d5ca42c95efe1c0b",
+    );
+    // include_bytes! rather than a string literal: the signature covers these
+    // exact bytes, so anything that could re-encode them on the way in would
+    // be testing a different payload than the one Core signed.
+    const VECTOR_MANIFEST: &[u8] = include_bytes!("../vectors/release-manifest.json");
+    const VECTOR_MANIFEST_TAMPERED: &[u8] =
+        include_bytes!("../vectors/release-manifest-tampered.json");
+
+    #[test]
+    fn a_manifest_signed_by_core_verifies_and_is_carried_through_unaltered() {
+        let verified = verify_manifest_with_key(
+            &hex(VECTOR_PUBLIC_KEY),
+            VECTOR_MANIFEST,
+            &hex(VECTOR_SIGNATURE),
+        )
+        .expect("Core's release manifest vector must verify");
+        assert_eq!(verified.as_bytes(), VECTOR_MANIFEST);
+    }
+
+    #[test]
+    fn a_semantically_identical_manifest_is_still_refused() {
+        // This is the case the whole verify-before-parse design exists for.
+        // The tamper is a single space inserted before a colon, so the two
+        // payloads parse to the same JSON and differ only as bytes: an
+        // implementation that parsed first and verified the re-encoded result
+        // would accept this happily, and so would one that verified a
+        // normalised form. Ours verifies the bytes, so it refuses.
+        let as_signed: serde_json::Value =
+            serde_json::from_slice(VECTOR_MANIFEST).expect("the vector is JSON");
+        let as_tampered: serde_json::Value =
+            serde_json::from_slice(VECTOR_MANIFEST_TAMPERED).expect("the vector is JSON");
+        assert_eq!(
+            as_signed, as_tampered,
+            "the tampered vector has stopped being semantically identical, so it no \
+             longer tests what it was written to test; do not reformat these files"
+        );
+        assert_ne!(VECTOR_MANIFEST, VECTOR_MANIFEST_TAMPERED);
+
+        assert_eq!(
+            verify_manifest_with_key(
+                &hex(VECTOR_PUBLIC_KEY),
+                VECTOR_MANIFEST_TAMPERED,
+                &hex(VECTOR_SIGNATURE),
+            ),
+            Err(ManifestVerifyError::SignatureMismatch),
+        );
+    }
+
+    #[test]
+    fn a_signature_one_byte_short_is_refused_before_any_curve_operation() {
+        // Core's third vector is the valid signature with its last byte cut
+        // off. Worth being exact about what this proves: the refusal comes
+        // from the length conversion, not from verify_strict, so it certifies
+        // the guard in front of the cryptography rather than the cryptography.
+        // That ordering is the point — a 63-byte input never reaches the
+        // curve — but it means this case says nothing about verify_strict.
+        let truncated = &hex(VECTOR_SIGNATURE)[..MANIFEST_SIGNATURE_LEN - 1];
+        assert_eq!(
+            verify_manifest_with_key(&hex(VECTOR_PUBLIC_KEY), VECTOR_MANIFEST, truncated),
+            Err(ManifestVerifyError::MalformedSignature),
+        );
+    }
+
+    /// Every variant, so a future one cannot be added with prose that only
+    /// `message()` knows about.
+    #[test]
+    fn display_renders_exactly_the_message_text() {
+        for e in [
+            ManifestVerifyError::NoTrustAnchor,
+            ManifestVerifyError::EmptyManifest,
+            ManifestVerifyError::ManifestTooLarge,
+            ManifestVerifyError::MalformedPublicKey,
+            ManifestVerifyError::WeakPublicKey,
+            ManifestVerifyError::MalformedSignature,
+            ManifestVerifyError::SignatureMismatch,
+        ] {
+            assert_eq!(e.to_string(), e.message());
+        }
+    }
+
+    /// The coarseness is the point: an operator-facing rendering that named
+    /// the offending bytes would hand an attacker a verification oracle.
+    #[test]
+    fn display_never_leaks_manifest_bytes() {
+        let rendered = ManifestVerifyError::SignatureMismatch.to_string();
+        assert!(!rendered.contains('\n'));
+        assert!(rendered.ends_with("refusing to verify"));
     }
 }

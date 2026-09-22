@@ -1,0 +1,30 @@
+{
+    "schema":  "rhodiz.harness.windows-evidence/wsl-probe/1",
+    "label":  "win11-home-26200",
+    "capturedAt":  "2026-09-21T21:25:45Z",
+    "wslPresent":  true,
+    "probes":  {
+                   "wsl-version":  {
+                                       "executed":  true,
+                                       "exitCode":  0,
+                                       "stdoutBase64":  "VgBlAHIAcwBpAPMAbgAgAGQAZQAgAFcAUwBMADoAIAAyAC4ANwAuADEAMAAuADAADQAKAFYAZQByAHMAaQDzAG4AIABkAGUAIABrAGUAcgBuAGUAbAA6ACAANgAuADEAOAAuADMAMwAuADIALQAyAA0ACgBWAGUAcgBzAGkA8wBuACAAZABlACAAVwBTAEwAZwA6ACAAMQAuADAALgA3ADMALgAyAA0ACgBWAGUAcgBzAGkA8wBuACAAZABlACAATQBTAFIARABDADoAIAAxAC4AMgAuADYANgA3ADYADQAKAFYAZQByAHMAaQDzAG4AIABkAGUAIABEAGkAcgBlAGMAdAAzAEQAOgAgADEALgA2ADEAMQAuADEALQA4ADEANQAyADgANQAxADEADQAKAFYAZQByAHMAaQDzAG4AIABkAGUAIABEAFgAQwBvAHIAZQA6ACAAMQAwAC4AMAAuADIANgAxADAAMAAuADEALQAyADQAMAAzADMAMQAtADEANAAzADUALgBnAGUALQByAGUAbABlAGEAcwBlAA0ACgBWAGUAcgBzAGkA8wBuACAAZABlACAAVwBpAG4AZABvAHcAcwA6ACAAMQAwAC4AMAAuADIANgAyADAAMAAuADkANAA1ADcADQAKAA==",
+                                       "stdoutByteLength":  490,
+                                       "stderrBase64":  "",
+                                       "stderrByteLength":  0,
+                                       "arguments":  [
+                                                         "--version"
+                                                     ]
+                                   },
+                   "wsl-status":  {
+                                      "executed":  true,
+                                      "exitCode":  0,
+                                      "stdoutBase64":  "RABpAHMAdAByAGkAYgB1AGMAaQDzAG4AIABwAHIAZQBkAGUAdABlAHIAbQBpAG4AYQBkAGEAOgAgAFUAYgB1AG4AdAB1AA0ACgBWAGUAcgBzAGkA8wBuACAAcAByAGUAZABlAHQAZQByAG0AaQBuAGEAZABhADoAIAAyAA0ACgA=",
+                                      "stdoutByteLength":  128,
+                                      "stderrBase64":  "",
+                                      "stderrByteLength":  0,
+                                      "arguments":  [
+                                                        "--status"
+                                                    ]
+                                  }
+               }
+}
