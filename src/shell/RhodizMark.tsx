@@ -1,33 +1,35 @@
 import type { IconProps } from '@opal/types'
-// The application icon itself, imported from where Tauri bundles it so the
-// sidebar, the title bar and the taskbar cannot drift apart. There is no
-// vector of the mark in this repository; when one exists it replaces this
-// file and nothing that renders it has to change.
+// The mark on alpha, trimmed to its own bounds and squared — not the packaged
+// application icon. `src-tauri/icons/64x64.png` is a fully opaque tile, correct
+// for a taskbar where the platform draws no backdrop, and wrong here: rendered
+// in the sidebar it is a hard-edged rectangle darker than the surface behind
+// it, which reads as a box in the dark theme and as a black square in the
+// light one.
 //
-// The 64px layer, not the 32px one: this renders at 28 CSS pixels, which is
-// 56 device pixels on the 2x display the window is expected to run on, and a
-// 32px source upscaled to 56 is visibly soft.
-import markUrl from '../../src-tauri/icons/64x64.png'
+// 112px source for a 28px box: 4x, so the glyph stays crisp on a 2x display
+// and still has headroom on a 3x one.
+import markUrl from './rhodiz-mark.png'
 
-/**
- * The RHODIZ mark, in the shape `SidebarLayouts.Header`'s `renderAppLogo`
- * expects.
- *
- * `IconProps` is declared over `SVGProps`, and this renders an `<img>`,
- * so the SVG-specific attributes are deliberately not forwarded: passing
- * `strokeWidth` to an image would be silently meaningless. Only `size` and
- * the accessible name apply.
- */
+// The mark itself is silver, drawn for a dark backdrop; on the light theme's
+// surface it washes out. So the backdrop travels with it instead of being
+// inherited — the same two values the packaged icon is built from, which is
+// what keeps the sidebar chip and the taskbar icon the same object. Fixed on
+// purpose: an identity that changes colour with the theme is two identities.
+const CHIP = 'linear-gradient(135deg, #161B23 0%, #090B0F 100%)'
+
 export default function RhodizMark({ size = 28 }: IconProps) {
   return (
-    <img
-      src={markUrl}
-      width={size}
-      height={size}
-      alt=""
+    <span
       aria-hidden="true"
-      draggable={false}
-      className="select-none"
-    />
+      className="inline-flex shrink-0 items-center justify-center rounded-lg"
+      style={{ width: size, height: size, background: CHIP, padding: size * 0.12 }}
+    >
+      <img
+        src={markUrl}
+        alt=""
+        draggable={false}
+        className="size-full select-none"
+      />
+    </span>
   )
 }

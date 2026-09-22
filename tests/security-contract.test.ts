@@ -5,8 +5,10 @@ import { expect, test } from 'vitest'
 // Every assertion below is a source-text contract: `indexOf` offsets and `$`
 // anchors both change meaning under CRLF, and the Windows CI runner checks out
 // with CRLF. Normalise once, here, so no individual test has to remember.
+const readBytes = async (relative: string) =>
+  readFile(new URL('../' + relative, import.meta.url))
 const read = async (relative: string) =>
-  (await readFile(new URL('../' + relative, import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
+  (await readBytes(relative)).toString('utf8').replace(/\r\n/g, '\n')
 
 test('Tauri shell is local-only with a non-null CSP and production devtools disabled', async () => {
   const config = JSON.parse(await read('src-tauri/tauri.conf.json'))
@@ -867,4 +869,29 @@ test('the brand overrides are loaded where they can actually override', async ()
     const block = sheet.slice(at, sheet.indexOf('}', at))
     expect([...block.matchAll(/--action-(?:selection-0\d|text-link-05):/g)].length).toBe(8)
   }
+})
+
+test('the sidebar mark is the transparent master, not the packaged application icon', async () => {
+  // `src-tauri/icons/64x64.png` is a fully opaque tile — right for a taskbar,
+  // where the platform draws no backdrop, and wrong inside the window, where
+  // it renders as a hard-edged rectangle darker than the surface behind it.
+  // The regression is silent: the import resolves, the image decodes, and only
+  // a screenshot shows the black square.
+  const mark = await read('src/shell/RhodizMark.tsx')
+  // The import line, not the prose: the comment above it names the same path
+  // to explain why it is not used, and a match there would pass forever.
+  const imports = [...mark.matchAll(/^import .* from '(.+)'$/gm)].map((m) => m[1])
+  expect(imports).toContain('./rhodiz-mark.png')
+  expect(imports.some((from) => from.includes('src-tauri/icons'))).toBe(false)
+
+  // `readBytes`, not `new URL('literal', import.meta.url)`: Vite recognises
+  // that exact shape as an asset reference and rewrites it to a served URL, so
+  // the literal form resolves to http://localhost and readFile refuses it.
+  const png = await readBytes('src/shell/rhodiz-mark.png')
+  expect(png.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a')
+  // IHDR: width, height, then bit depth and colour type. Type 6 is RGBA — an
+  // opaque re-export would land on 2 and lose the alpha this depends on.
+  expect(png.readUInt32BE(16)).toBe(112)
+  expect(png.readUInt32BE(20)).toBe(112)
+  expect(png.readUInt8(25)).toBe(6)
 })

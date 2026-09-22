@@ -257,6 +257,29 @@ Nothing regresses below AA. **The neutrals are untouched** — they are onyx's
 greys, they are the reason the shell reads as calm, and repainting them would
 be redesigning the design system rather than branding it.
 
+## Authored here: the sidebar mark
+
+`src/shell/rhodiz-mark.png` is derived from `assets/brand/rhodiz-mark-1024-transparent.png`
+— the mark on alpha — cropped to its own bounding box `(62, 2, 952, 904)`,
+padded to a square, and resampled to 112×112. No upstream bytes; the source is
+the RHODIZ brand artwork this repository already carries.
+
+It exists because the component rendered `src-tauri/icons/64x64.png` instead.
+That file is the packaged application icon and is correct as such: 4096 of 4096
+pixels fully opaque, a flat tile from `#161B23` to `#090B0F`, because a taskbar
+draws no backdrop of its own. Inside the window it is a hard-edged rectangle
+darker than the surface behind it — a box in the dark theme, a black square in
+the light one. The regression is silent: the import resolves and the image
+decodes, so only a screenshot shows it.
+
+The backdrop now travels with the component rather than being baked into the
+file. The mark is silver — mean luma 178 over its opaque pixels — so it is
+legible on the dark sidebar and washes out on the light one; the chip carries
+the icon's own two values, fixed in both themes, which is what keeps the
+sidebar mark and the taskbar icon the same object. `tests/security-contract.test.ts`
+asserts the import target, the 112×112 dimensions and PNG colour type 6, so an
+opaque re-export fails rather than shipping.
+
 ## Adapted, not vendored: the streaming packet protocol
 
 | field | value |
