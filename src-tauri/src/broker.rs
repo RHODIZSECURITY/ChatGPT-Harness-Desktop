@@ -47,7 +47,7 @@ use std::sync::{Mutex, TryLockError};
 use std::{
     env,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     os::windows::{fs::OpenOptionsExt, process::CommandExt},
     path::PathBuf,
     process::{Command, Stdio},
@@ -358,12 +358,7 @@ where
 
 #[cfg(target_os = "windows")]
 fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
-    // Step 1: WSL preflight (same as before)
-    emit_progress(
-        app.as_ref(),
-        ProvisioningStep::FetchManifest,
-        "Fetching release manifest and signature",
-    );
+    // Step 1: WSL preflight
     let status = run_wsl(&fixed_args(WSL_STATUS_ARGS)).outcome;
     let version = if matches!(status, CommandOutcome::Success) {
         read_wsl_version()
@@ -376,6 +371,11 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
     }
 
     // Step 2: Fetch manifest + signature from update channel
+    emit_progress(
+        app.as_ref(),
+        ProvisioningStep::FetchManifest,
+        "Fetching release manifest and signature",
+    );
     let (manifest_bytes, signature_bytes) = match fetch_manifest_and_signature() {
         Ok(v) => v,
         Err(e) => {
@@ -427,7 +427,25 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
         ProvisioningStep::Decide,
         "Deciding update action",
     );
-    let installed = load_installed_release();
+    // An unreadable state file is not an empty one. `decide_update` reads the
+    // anti-rollback floor out of this value, and `None` tells it there is no
+    // floor to clear, so swallowing a read or parse failure here would let any
+    // genuinely signed release through no matter how old -- which is the
+    // replay attack the floor exists to stop. Refusing is the safe answer:
+    // provisioning stops, and a machine that cannot read its own state was not
+    // going to provision correctly anyway.
+    let installed = match load_installed_release() {
+        Ok(v) => v,
+        Err(e) => {
+            return RuntimeOperationResult {
+                operation: RuntimeOperation::Provision,
+                state: OperationState::Failed,
+                detail: Some(format!(
+                    "refusing to provision: cannot establish the anti-rollback floor ({e})"
+                )),
+            };
+        }
+    };
     let decision = decide_update(&manifest, installed);
     let decision_clone = decision; // for match
     let decision_desc = match decision_clone {
@@ -487,13 +505,19 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
         }
     };
 
-    // Step 8: Verify digest
+    // Step 8: Report the digest check `download_rootfs` already performed.
+    //
+    // Past tense on purpose: the comparison happens inside the download, so by
+    // the time this fires there is nothing left to verify. The wording also
+    // deliberately does not claim the rootfs was verified, because it was not
+    // -- see `download_rootfs` for what that digest actually covers. A UI
+    // reading "rootfs verified" here would be reporting a guarantee the signed
+    // manifest does not yet provide.
     emit_progress(
         app.as_ref(),
         ProvisioningStep::VerifyDigest,
-        "Verifying rootfs SHA256 digest",
+        "Checked the downloaded tarball against the digest the manifest carries",
     );
-    // (Digest verification happens inside download_rootfs)
 
     // Step 9: Import into WSL
     emit_progress(
@@ -507,7 +531,16 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
     // too, which they do not yet, and provisioning into a slot the rest of
     // the broker cannot address would be worse than not staging at all.
     let target_slot = DistroSlot::INITIAL;
-    let install_dir = compute_install_dir();
+    let install_dir = match compute_install_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            return RuntimeOperationResult {
+                operation: RuntimeOperation::Provision,
+                state: OperationState::Failed,
+                detail: Some(format!("cannot determine the install directory: {e}")),
+            };
+        }
+    };
     let import_args = match wsl_import_args(target_slot, &install_dir, &tarball_path) {
         Ok(args) => args,
         Err(e) => {
@@ -548,7 +581,28 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
         return operation_result(RuntimeOperation::Provision, terminate_result.outcome);
     }
 
-    // Step 12: Persist new installed state
+    // Step 12: Provision Docker inside the distro
+    //
+    // Ahead of persisting state, not after it. State is the record that this
+    // release is installed and serving; writing it before the install is
+    // finished would leave a failed provision claiming success, and the
+    // recorded sequence would then raise the anti-rollback floor on behalf of
+    // a distro that has no working Docker in it. The next provision would be
+    // measured against that floor.
+    emit_progress(
+        app.as_ref(),
+        ProvisioningStep::InstallDocker,
+        "Installing Docker inside the distro",
+    );
+    if let Err(e) = provision_docker_in_distro() {
+        return RuntimeOperationResult {
+            operation: RuntimeOperation::Provision,
+            state: OperationState::Failed,
+            detail: Some(format!("docker provisioning failed: {e}")),
+        };
+    }
+
+    // Step 13: Persist new installed state
     emit_progress(
         app.as_ref(),
         ProvisioningStep::PersistState,
@@ -568,22 +622,6 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
             operation: RuntimeOperation::Provision,
             state: OperationState::Failed,
             detail: Some(format!("failed to persist installed state: {e}")),
-        };
-    }
-
-    // Step 13: Provision Docker inside the distro
-    emit_progress(
-        app.as_ref(),
-        ProvisioningStep::InstallDocker,
-        "Installing Docker inside the distro",
-    );
-
-    // Step 12: Provision Docker inside the distro
-    if let Err(e) = provision_docker_in_distro() {
-        return RuntimeOperationResult {
-            operation: RuntimeOperation::Provision,
-            state: OperationState::Failed,
-            detail: Some(format!("docker provisioning failed: {e}")),
         };
     }
 
@@ -653,9 +691,13 @@ struct PersistedState {
     /// Absent from state files written before slots existed. Such a file
     /// describes an install that went into the primary slot, which is what
     /// `INITIAL` is, so defaulting reads it faithfully rather than guessing.
-    /// Rejecting it instead would make `load_installed_release` return `None`,
-    /// and a `None` here silently drops the recorded rollback floor — the
-    /// anti-rollback guarantee would be lost on the next provision.
+    ///
+    /// Without the default, serde treats the missing field as a parse error,
+    /// and `load_persisted_state` turns a parse error into a refusal to
+    /// provision -- so every pre-slot install would become a machine that
+    /// cannot update. Defaulting is not a way around that refusal: it applies
+    /// only where the old file's meaning is known exactly, which leaves
+    /// nothing to refuse.
     #[serde(default = "initial_slot")]
     active_slot: DistroSlot,
 }
@@ -665,30 +707,61 @@ fn initial_slot() -> DistroSlot {
     DistroSlot::INITIAL
 }
 
+/// Reads the state file, distinguishing "nothing is installed" from "cannot
+/// tell what is installed".
+///
+/// Only a missing file is `Ok(None)`: that is the genuine pre-first-install
+/// state. A file that exists but will not read or will not parse is an error,
+/// because the alternative -- reporting it as absent -- makes a corrupt state
+/// file indistinguishable from a fresh machine, and callers draw security
+/// conclusions from that difference.
 #[cfg(target_os = "windows")]
-fn load_persisted_state() -> Option<PersistedState> {
-    let path = installed_state_path();
-    let data = fs::read(&path).ok()?;
-    serde_json::from_slice(&data).ok()
+fn load_persisted_state() -> Result<Option<PersistedState>, String> {
+    let path = installed_state_path()?;
+    let data = match fs::read(&path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(format!(
+                "cannot read installed state at {}: {e}",
+                path.display()
+            ))
+        }
+    };
+    serde_json::from_slice(&data)
+        .map(Some)
+        .map_err(|e| format!("installed state at {} does not parse: {e}", path.display()))
 }
 
 #[cfg(target_os = "windows")]
-fn load_installed_release() -> Option<InstalledRelease> {
-    load_persisted_state().map(|state| InstalledRelease {
+fn load_installed_release() -> Result<Option<InstalledRelease>, String> {
+    Ok(load_persisted_state()?.map(|state| InstalledRelease {
         sequence: state.sequence,
         rollback_floor: state.rollback_floor,
-    })
+    }))
 }
 
 /// The slot every lifecycle command is aimed at.
 ///
-/// An unreadable or absent state file answers `INITIAL` rather than failing:
-/// before the first provision there is no file, and the primary slot is where
-/// a first install lands, so that is the only slot a command could be talking
-/// about.
+/// Absent state answers `INITIAL`: before the first provision there is no
+/// file, and the primary slot is where a first install lands, so that is the
+/// only slot a command could be talking about.
+///
+/// Unreadable state also answers `INITIAL`, and that is a knowing compromise
+/// rather than a safe default. Today provisioning always imports into the
+/// primary slot, so the secondary distro never exists and the fallback cannot
+/// name the wrong one. That stops being true the moment the swap lands: a
+/// corrupt state file would then aim `start` at a stale distro that is still
+/// on disk. The fix belongs with the swap -- the lifecycle commands need to
+/// carry a failure out to the renderer, which means threading `Result` through
+/// all five of them -- and doing it here first would be a signature change
+/// with nothing yet able to trigger the bug it guards.
 #[cfg(target_os = "windows")]
 fn active_slot() -> DistroSlot {
-    load_persisted_state().map_or(DistroSlot::INITIAL, |state| state.active_slot)
+    load_persisted_state()
+        .ok()
+        .flatten()
+        .map_or(DistroSlot::INITIAL, |state| state.active_slot)
 }
 
 #[cfg(target_os = "windows")]
@@ -696,7 +769,7 @@ fn persist_installed_release(
     installed: &InstalledRelease,
     active_slot: DistroSlot,
 ) -> Result<(), String> {
-    let path = installed_state_path();
+    let path = installed_state_path()?;
     // A first install writes into a directory no one has created yet.
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -710,24 +783,37 @@ fn persist_installed_release(
     fs::write(&path, json).map_err(|e| e.to_string())
 }
 
+/// The per-user root every broker-owned path hangs off.
+///
+/// `LOCALAPPDATA` comes from the session, not from us, so a stripped or
+/// service-side environment can arrive without it. Unwrapping there panics
+/// inside a Tauri command handler, where the renderer sees an IPC call that
+/// simply never returns and has no way to say why. Returning the failure lets
+/// each caller report it as the operation failing, which is what it is.
 #[cfg(target_os = "windows")]
-fn installed_state_path() -> PathBuf {
-    let root = PathBuf::from(env::var_os("LOCALAPPDATA").unwrap());
-    root.join("RHODIZ").join("installed.json")
+fn local_app_data() -> Result<PathBuf, String> {
+    env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| "LOCALAPPDATA is not set in this environment".to_string())
 }
 
 #[cfg(target_os = "windows")]
-fn compute_install_dir() -> String {
-    let root = PathBuf::from(env::var_os("LOCALAPPDATA").unwrap());
-    root.join("RHODIZ")
+fn installed_state_path() -> Result<PathBuf, String> {
+    Ok(local_app_data()?.join("RHODIZ").join("installed.json"))
+}
+
+#[cfg(target_os = "windows")]
+fn compute_install_dir() -> Result<String, String> {
+    Ok(local_app_data()?
+        .join("RHODIZ")
         .join("Distro")
         .to_string_lossy()
-        .to_string()
+        .to_string())
 }
 
 #[cfg(target_os = "windows")]
 fn download_rootfs(bundle: &RuntimeBundle) -> Result<String, String> {
-    let download_dir = download_dir_path();
+    let download_dir = download_dir_path()?;
     fs::create_dir_all(&download_dir).map_err(|e| e.to_string())?;
 
     // The manifest does not carry the tarball URL directly; it is expected
@@ -774,9 +860,8 @@ fn download_rootfs(bundle: &RuntimeBundle) -> Result<String, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn download_dir_path() -> PathBuf {
-    let root = PathBuf::from(env::var_os("LOCALAPPDATA").unwrap());
-    root.join("RHODIZ").join("Downloads")
+fn download_dir_path() -> Result<PathBuf, String> {
+    Ok(local_app_data()?.join("RHODIZ").join("Downloads"))
 }
 
 #[cfg(target_os = "windows")]

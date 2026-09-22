@@ -350,3 +350,46 @@ test('manifest signature verification is enforced before any parse', async () =>
   expect(reExportBlock).toContain('verify_release_manifest')
   expect(reExportBlock).not.toContain('verify_manifest_with_key')
 })
+
+// The provisioning pipeline draws security conclusions from the order its
+// steps run in and from the difference between "no state" and "unreadable
+// state". Both are properties of control flow that no type enforces, so pin
+// them here: each assertion below corresponds to a way the pipeline has
+// already been wrong once.
+test('provisioning fails closed on unreadable state and installs before it records success', async () => {
+  const broker = await read('src-tauri/src/broker.rs')
+
+  // Only a missing file may read as "nothing installed". Any other read or
+  // parse failure has to surface, because `decide_update` takes the absence
+  // of state as the absence of an anti-rollback floor -- so a swallowed
+  // error would let an arbitrarily old signed release install.
+  expect(broker).toContain('fn load_persisted_state() -> Result<Option<PersistedState>, String>')
+  expect(broker).toContain('Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None)')
+
+  // ...and the caller has to act on that error rather than defaulting. Assert
+  // on the span between the load and the decision: a `Failed` return has to
+  // sit inside it, which is what stops provisioning before a floor-less
+  // decision can be made.
+  const loadAt = broker.indexOf('match load_installed_release()')
+  const decideAt = broker.indexOf('decide_update(&manifest, installed)')
+  expect(loadAt).toBeGreaterThan(-1)
+  expect(decideAt).toBeGreaterThan(loadAt)
+  expect(broker.slice(loadAt, decideAt)).toContain('state: OperationState::Failed')
+
+  // Docker is installed before state is persisted. Persisting first would
+  // record a release as installed while its runtime is still unprovisioned,
+  // and the recorded sequence would raise the rollback floor on behalf of a
+  // distro with no working Docker in it -- permanently, since the floor only
+  // ever rises.
+  const dockerAt = broker.indexOf('ProvisioningStep::InstallDocker')
+  const persistAt = broker.indexOf('ProvisioningStep::PersistState')
+  expect(dockerAt).toBeGreaterThan(-1)
+  expect(persistAt).toBeGreaterThan(dockerAt)
+
+  // Every broker-owned path hangs off one fallible accessor. Unwrapping the
+  // variable instead panics inside a Tauri command handler, where the
+  // renderer gets a dropped IPC call and no reason for it.
+  expect(broker).toContain('fn local_app_data() -> Result<PathBuf, String>')
+  expect(broker).not.toMatch(/var_os\("LOCALAPPDATA"\)\s*\)?\s*\.\s*unwrap\(\)/)
+  expect(broker).not.toMatch(/var_os\("LOCALAPPDATA"\)\.expect\(/)
+})
