@@ -10,12 +10,12 @@ use rhodiz_harness_broker_core::{
 // the fallback below never reaches it.
 #[cfg(target_os = "windows")]
 use rhodiz_harness_broker_core::{
-    decode_utf16le, extract_wsl_version, provisioning_preflight, WSL_VERSION_ARGS,
-    verify_release_manifest, parse_release_manifest, resolve_runtime_bundle,
-    decide_update, advanced_rollback_floor, wsl_import_args, ImportArgsError,
-    WSL_TERMINATE_ARGS, WSL_WRITE_CONF_ARGS, WSL_CONF_CONTENTS, MANAGED_DISTRO_NAME,
-    InstalledRelease, UpdateDecision, UpdateRefusal, BundleError, ManifestParseError,
-    RuntimeBundle, ReleaseManifest,
+    advanced_rollback_floor, decide_update, decode_utf16le, extract_wsl_version,
+    parse_release_manifest, provisioning_preflight, resolve_runtime_bundle,
+    verify_release_manifest, wsl_import_args, BundleError, ImportArgsError, InstalledRelease,
+    ManifestParseError, ReleaseManifest, RuntimeBundle, UpdateDecision, UpdateRefusal,
+    MANAGED_DISTRO_NAME, WSL_CONF_CONTENTS, WSL_TERMINATE_ARGS, WSL_VERSION_ARGS,
+    WSL_WRITE_CONF_ARGS,
 };
 
 // Only the non-Windows fallbacks report "unsupported"; importing it
@@ -401,7 +401,10 @@ fn platform_provision() -> RuntimeOperationResult {
     }
 
     // Step 9: Write wsl.conf via tee (stdin)
-    let write_conf_result = run_wsl_stdin(&fixed_args(WSL_WRITE_CONF_ARGS), WSL_CONF_CONTENTS.as_bytes());
+    let write_conf_result = run_wsl_stdin(
+        &fixed_args(WSL_WRITE_CONF_ARGS),
+        WSL_CONF_CONTENTS.as_bytes(),
+    );
     if !matches!(write_conf_result.outcome, CommandOutcome::Success) {
         return operation_result(RuntimeOperation::Provision, write_conf_result.outcome);
     }
@@ -438,7 +441,10 @@ fn platform_provision() -> RuntimeOperationResult {
     RuntimeOperationResult {
         operation: RuntimeOperation::Provision,
         state: OperationState::Succeeded,
-        detail: Some(format!("provisioned {} ({})", decision_desc, manifest.release_id)),
+        detail: Some(format!(
+            "provisioned {} ({})",
+            decision_desc, manifest.release_id
+        )),
     }
 }
 
@@ -452,23 +458,29 @@ fn fetch_manifest_and_signature() -> Result<(Vec<u8>, Vec<u8>), String> {
 
     // Fetch manifest
     let manifest_url = format!("{}/release.json", update_url.trim_end_matches('/'));
-    let manifest_resp = client.get(&manifest_url).send()
+    let manifest_resp = client
+        .get(&manifest_url)
+        .send()
         .map_err(|e| format!("manifest GET failed: {e}"))?;
     if !manifest_resp.status().is_success() {
         return Err(format!("manifest HTTP {}", manifest_resp.status()));
     }
-    let manifest_bytes = manifest_resp.bytes()
+    let manifest_bytes = manifest_resp
+        .bytes()
         .map_err(|e| format!("manifest read failed: {e}"))?
         .to_vec();
 
     // Fetch signature
     let sig_url = format!("{}/release.json.sig", update_url.trim_end_matches('/'));
-    let sig_resp = client.get(&sig_url).send()
+    let sig_resp = client
+        .get(&sig_url)
+        .send()
         .map_err(|e| format!("signature GET failed: {e}"))?;
     if !sig_resp.status().is_success() {
         return Err(format!("signature HTTP {}", sig_resp.status()));
     }
-    let signature_bytes = sig_resp.bytes()
+    let signature_bytes = sig_resp
+        .bytes()
         .map_err(|e| format!("signature read failed: {e}"))?
         .to_vec();
 
@@ -498,7 +510,10 @@ fn installed_state_path() -> PathBuf {
 #[cfg(target_os = "windows")]
 fn compute_install_dir() -> String {
     let root = PathBuf::from(env::var_os("LOCALAPPDATA").unwrap());
-    root.join("RHODIZ").join("Distro").to_string_lossy().to_string()
+    root.join("RHODIZ")
+        .join("Distro")
+        .to_string_lossy()
+        .to_string()
 }
 
 #[cfg(target_os = "windows")]
@@ -509,21 +524,25 @@ fn download_rootfs(manifest: &ReleaseManifest, bundle: &RuntimeBundle) -> Result
     // The manifest does not carry the tarball URL directly; it is expected
     // alongside release.json at the same base URL as "rootfs.tar.gz".
     // This is a convention we control on the producer side.
-    let update_url = env::var("RHODIZ_UPDATE_URL")
-        .map_err(|_| "RHODIZ_UPDATE_URL not set".to_string())?;
+    let update_url =
+        env::var("RHODIZ_UPDATE_URL").map_err(|_| "RHODIZ_UPDATE_URL not set".to_string())?;
     let base = update_url.trim_end_matches('/');
     let tarball_url = format!("{}/rootfs.tar.gz", base);
 
     let tarball_path = download_dir.join("rootfs.tar.gz");
     let client = reqwest::blocking::Client::new();
-    let mut resp = client.get(&tarball_url).send()
+    let mut resp = client
+        .get(&tarball_url)
+        .send()
         .map_err(|e| format!("rootfs GET failed: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("rootfs HTTP {}", resp.status()));
     }
 
     let mut file = File::create(&tarball_path).map_err(|e| e.to_string())?;
-    let bytes = resp.bytes().map_err(|e| format!("rootfs read failed: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .map_err(|e| format!("rootfs read failed: {e}"))?;
     file.write_all(&bytes).map_err(|e| e.to_string())?;
 
     // Verify SHA256 of downloaded tarball against compose_sha256
@@ -532,7 +551,8 @@ fn download_rootfs(manifest: &ReleaseManifest, bundle: &RuntimeBundle) -> Result
         let _ = fs::remove_file(&tarball_path);
         return Err(format!(
             "rootfs sha256 mismatch: expected {}, got {}",
-            bundle.compose_sha256(), computed
+            bundle.compose_sha256(),
+            computed
         ));
     }
 
@@ -553,7 +573,9 @@ fn sha256_hex(path: &PathBuf) -> Result<String, String> {
     let mut buf = [0u8; 8192];
     loop {
         let n = file.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
@@ -661,7 +683,10 @@ systemctl enable docker
 
     let result = run_wsl(&args);
     if !matches!(result.outcome, CommandOutcome::Success) {
-        return Err(format!("docker install script exited: {:?}", result.outcome));
+        return Err(format!(
+            "docker install script exited: {:?}",
+            result.outcome
+        ));
     }
     Ok(())
 }
