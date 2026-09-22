@@ -12,10 +12,10 @@ use rhodiz_harness_broker_core::{
 use rhodiz_harness_broker_core::{
     advanced_rollback_floor, decide_update, decode_utf16le, extract_wsl_version,
     parse_release_manifest, provisioning_preflight, resolve_runtime_bundle,
-    verify_release_manifest, wsl_import_args, BundleError, ImportArgsError, InstalledRelease,
-    ManifestParseError, ReleaseManifest, RuntimeBundle, UpdateDecision, UpdateRefusal,
-    MANAGED_DISTRO_NAME, WSL_CONF_CONTENTS, WSL_TERMINATE_ARGS, WSL_VERSION_ARGS,
-    WSL_WRITE_CONF_ARGS,
+    verify_release_manifest, wsl_import_args, wsl_terminate_args, wsl_write_conf_args, BundleError,
+    DistroSlot, ImportArgsError, InstalledRelease, ManifestParseError, ReleaseManifest,
+    RuntimeBundle, UpdateDecision, UpdateRefusal, MANAGED_DISTRO_NAME, WSL_CONF_CONTENTS,
+    WSL_VERSION_ARGS,
 };
 
 // `AppHandle` is referenced by both platforms (the non-Windows `platform_provision`
@@ -482,8 +482,14 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
         ProvisioningStep::ImportWsl,
         "Importing rootfs into WSL",
     );
+    // Every distro-scoped command below names this slot rather than a fixed
+    // distro. It is still the primary slot: staging the import into the
+    // inactive slot needs the lifecycle commands to resolve the active slot
+    // too, which they do not yet, and provisioning into a slot the rest of
+    // the broker cannot address would be worse than not staging at all.
+    let target_slot = DistroSlot::INITIAL;
     let install_dir = compute_install_dir();
-    let import_args = match wsl_import_args(&install_dir, &tarball_path) {
+    let import_args = match wsl_import_args(target_slot, &install_dir, &tarball_path) {
         Ok(args) => args,
         Err(e) => {
             return RuntimeOperationResult {
@@ -505,7 +511,7 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
         "Writing wsl.conf to enable systemd",
     );
     let write_conf_result = run_wsl_stdin(
-        &fixed_args(WSL_WRITE_CONF_ARGS),
+        &wsl_write_conf_args(target_slot),
         WSL_CONF_CONTENTS.as_bytes(),
     );
     if !matches!(write_conf_result.outcome, CommandOutcome::Success) {
@@ -518,7 +524,7 @@ fn platform_provision(app: Option<AppHandle>) -> RuntimeOperationResult {
         ProvisioningStep::RestartWsl,
         "Terminating distro to boot with systemd",
     );
-    let terminate_result = run_wsl(&fixed_args(WSL_TERMINATE_ARGS));
+    let terminate_result = run_wsl(&wsl_terminate_args(target_slot));
     if !matches!(terminate_result.outcome, CommandOutcome::Success) {
         return operation_result(RuntimeOperation::Provision, terminate_result.outcome);
     }

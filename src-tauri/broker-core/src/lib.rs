@@ -27,7 +27,52 @@ pub use release::{
     SUPPORTED_SCHEMA_VERSION,
 };
 
+/// The first distro name. A first install lands here; see `DistroSlot`.
 pub const MANAGED_DISTRO_NAME: &str = "RHODIZ-Harness";
+
+/// The second distro name, used to prepare a release without touching the one
+/// currently serving the operator.
+pub const STAGING_DISTRO_NAME: &str = "RHODIZ-Harness-Next";
+
+/// Which of the two distro names a `wsl.exe` command is aimed at.
+///
+/// A transactional update never writes over the distro that is currently
+/// serving the operator: the new rootfs is imported and fully configured
+/// under the inactive name, and only once that has succeeded does the active
+/// name move. `wsl.exe` exposes no rename primitive, so "swap" here means
+/// recording which name is active — not moving a distro between names. The
+/// two names are therefore slots that alternate across updates, and neither
+/// one is permanently "the production distro".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DistroSlot {
+    /// `MANAGED_DISTRO_NAME`. The slot a first install lands in.
+    Primary,
+    /// `STAGING_DISTRO_NAME`.
+    Secondary,
+}
+
+impl DistroSlot {
+    /// The slot a first install lands in, before any update has alternated.
+    pub const INITIAL: Self = Self::Primary;
+
+    pub const fn distro_name(self) -> &'static str {
+        match self {
+            Self::Primary => MANAGED_DISTRO_NAME,
+            Self::Secondary => STAGING_DISTRO_NAME,
+        }
+    }
+
+    /// The slot an update must be staged in, given the slot serving now.
+    ///
+    /// An involution, so staging is always the one name that is not live and
+    /// the caller cannot arrive at the live one by iterating.
+    pub const fn other(self) -> Self {
+        match self {
+            Self::Primary => Self::Secondary,
+            Self::Secondary => Self::Primary,
+        }
+    }
+}
 pub const RUNTIME_BOOTSTRAP_UNIT: &str = "rhodiz-harness-bootstrap.service";
 pub const WSL_EXE: &str = "wsl.exe";
 pub const WSL_STATUS_ARGS: [&str; 1] = ["--status"];
@@ -437,7 +482,9 @@ pub const WSL_VERSION_ARGS: [&str; 1] = ["--version"];
 /// Required after writing `/etc/wsl.conf`: WSL reads that file at boot, so a
 /// running distro keeps the configuration it started with and systemd would
 /// appear not to have been enabled.
-pub const WSL_TERMINATE_ARGS: [&str; 2] = ["--terminate", MANAGED_DISTRO_NAME];
+pub fn wsl_terminate_args(slot: DistroSlot) -> [String; 2] {
+    ["--terminate".to_string(), slot.distro_name().to_string()]
+}
 
 /// Written to `/etc/wsl.conf` to turn systemd on inside the managed distro.
 ///
@@ -453,14 +500,16 @@ pub const WSL_CONF_CONTENTS: &str = "[boot]\nsystemd=true\n";
 /// reads the bytes from stdin and writes them, so the content never passes
 /// through anything that could interpret it, and the argument vector stays
 /// fixed and auditable.
-pub const WSL_WRITE_CONF_ARGS: [&str; 6] = [
-    "--distribution",
-    MANAGED_DISTRO_NAME,
-    "--user",
-    "root",
-    "--exec",
-    "tee",
-];
+pub fn wsl_write_conf_args(slot: DistroSlot) -> [String; 6] {
+    [
+        "--distribution".to_string(),
+        slot.distro_name().to_string(),
+        "--user".to_string(),
+        "root".to_string(),
+        "--exec".to_string(),
+        "tee".to_string(),
+    ]
+}
 
 /// Why an import was refused before `wsl.exe` was ever spawned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -493,7 +542,11 @@ impl ImportArgsError {
 /// `--version 2` is pinned and not a parameter. WSL1 has no systemd and no
 /// working Docker, so importing under it produces a distro that fails much
 /// later and much less legibly than a refusal here would.
+///
+/// The slot is a parameter because an update must import into the name that
+/// is not currently serving the operator; see `DistroSlot`.
 pub fn wsl_import_args(
+    slot: DistroSlot,
     install_dir: &str,
     rootfs_tarball: &str,
 ) -> Result<Vec<String>, ImportArgsError> {
@@ -508,12 +561,32 @@ pub fn wsl_import_args(
 
     Ok(vec![
         "--import".to_string(),
-        MANAGED_DISTRO_NAME.to_string(),
+        slot.distro_name().to_string(),
         install_dir.to_string(),
         rootfs_tarball.to_string(),
         "--version".to_string(),
         "2".to_string(),
     ])
+}
+
+/// Discards the slot that is *not* serving the operator.
+///
+/// This is the rollback path, and it takes the slot that is live rather than
+/// the slot to delete. That inversion is the point: `--unregister` destroys a
+/// distro and everything in it, so a rollback that accepted the name to
+/// remove would be one argument-passing mistake away from deleting the
+/// runtime the operator is relying on. Deriving the target from the live slot
+/// makes naming the live slot unrepresentable rather than merely discouraged.
+///
+/// Used on both edges of an update: to clear a half-prepared staging distro
+/// after a failure, and to reclaim the superseded one after a successful
+/// swap. In both cases "the slot that is not live" is the correct target, so
+/// one vector serves both and neither can be aimed at the live distro.
+pub fn wsl_discard_inactive_args(active: DistroSlot) -> [String; 2] {
+    [
+        "--unregister".to_string(),
+        active.other().distro_name().to_string(),
+    ]
 }
 
 /// Interim floor for the WSL2 feature set the broker relies on. The release
@@ -1126,19 +1199,87 @@ mod tests {
 
     #[test]
     fn provisioning_arg_vectors_are_fixed_shell_free_and_pin_the_distro() {
-        assert_eq!(WSL_TERMINATE_ARGS, ["--terminate", MANAGED_DISTRO_NAME]);
-        assert_eq!(WSL_WRITE_CONF_ARGS[1], MANAGED_DISTRO_NAME);
-        assert_eq!(WSL_WRITE_CONF_ARGS[5], "tee");
+        for slot in [DistroSlot::Primary, DistroSlot::Secondary] {
+            let terminate = wsl_terminate_args(slot);
+            let write_conf = wsl_write_conf_args(slot);
+            let discard = wsl_discard_inactive_args(slot);
 
-        // The same shell-freedom the lifecycle vectors hold. Writing a config
-        // file is where a shell is most tempting and least defensible.
-        for arg in WSL_WRITE_CONF_ARGS.iter().chain(WSL_TERMINATE_ARGS.iter()) {
-            assert!(*arg != "sh" && *arg != "bash", "{arg} is a shell");
-            assert!(!arg.contains("powershell"));
-            assert!(!arg.contains("cmd.exe"));
-            // No redirection, no separators: nothing that only means anything
-            // to an interpreter.
-            assert!(!arg.contains('>') && !arg.contains('|') && !arg.contains(';'));
+            assert_eq!(terminate, ["--terminate", slot.distro_name()]);
+            assert_eq!(write_conf[1], slot.distro_name());
+            assert_eq!(write_conf[5], "tee");
+
+            // The same shell-freedom the lifecycle vectors hold. Writing a
+            // config file is where a shell is most tempting and least
+            // defensible.
+            for arg in write_conf.iter().chain(&terminate).chain(&discard) {
+                assert!(arg != "sh" && arg != "bash", "{arg} is a shell");
+                assert!(!arg.contains("powershell"));
+                assert!(!arg.contains("cmd.exe"));
+                // No redirection, no separators: nothing that only means
+                // anything to an interpreter.
+                assert!(!arg.contains('>') && !arg.contains('|') && !arg.contains(';'));
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_slots_are_distinct_names_and_other_is_an_involution() {
+        assert_ne!(
+            DistroSlot::Primary.distro_name(),
+            DistroSlot::Secondary.distro_name(),
+            "a single name cannot hold a live distro and a staged one at once"
+        );
+        assert_eq!(DistroSlot::Primary.distro_name(), MANAGED_DISTRO_NAME);
+        assert_eq!(DistroSlot::Secondary.distro_name(), STAGING_DISTRO_NAME);
+        assert_eq!(DistroSlot::INITIAL, DistroSlot::Primary);
+
+        for slot in [DistroSlot::Primary, DistroSlot::Secondary] {
+            assert_ne!(slot.other(), slot, "staging must never be the live slot");
+            assert_eq!(
+                slot.other().other(),
+                slot,
+                "two updates return to the start"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rollback_can_never_be_aimed_at_the_live_distro() {
+        // The invariant the whole staging design rests on. `--unregister`
+        // destroys a distro and everything in it, so the one thing cleanup
+        // must be incapable of is naming the distro the operator is using.
+        // `wsl_discard_inactive_args` takes the live slot, not the target, so
+        // there is no argument a caller could pass to delete the live one.
+        for live in [DistroSlot::Primary, DistroSlot::Secondary] {
+            let discard = wsl_discard_inactive_args(live);
+            assert_eq!(discard[0], "--unregister");
+            assert_ne!(
+                discard[1],
+                live.distro_name(),
+                "cleanup named the distro that is serving the operator"
+            );
+            assert_eq!(discard[1], live.other().distro_name());
+        }
+    }
+
+    #[test]
+    fn an_update_stages_into_the_name_that_is_not_live() {
+        // A first install lands in Primary, so its update must be prepared in
+        // Secondary and leave the live rootfs in place; the update after that
+        // alternates back. At no point does an import name the live slot.
+        let mut live = DistroSlot::INITIAL;
+        for _ in 0..4 {
+            let staging = live.other();
+            let import = wsl_import_args(staging, r"C:\RHODIZ\next", r"C:\RHODIZ\next.tar")
+                .expect("ordinary Windows paths must be accepted");
+            assert_eq!(import[1], staging.distro_name());
+            assert_ne!(
+                import[1],
+                live.distro_name(),
+                "an import overwrote the live distro"
+            );
+            // The swap is the active slot moving; nothing renames a distro.
+            live = staging;
         }
     }
 
@@ -1154,6 +1295,7 @@ mod tests {
     #[test]
     fn an_import_pins_the_distro_and_wsl2() {
         let args = wsl_import_args(
+            DistroSlot::INITIAL,
             r"C:\ProgramData\RHODIZ\distro",
             r"C:\ProgramData\RHODIZ\rootfs.tar",
         )
@@ -1174,15 +1316,15 @@ mod tests {
         // would be consumed as a flag and the next real argument taken as the
         // value. Caught before wsl.exe ever runs.
         assert_eq!(
-            wsl_import_args("--version", "/tmp/rootfs.tar"),
+            wsl_import_args(DistroSlot::INITIAL, "--version", "/tmp/rootfs.tar"),
             Err(ImportArgsError::PathLooksLikeAFlag)
         );
         assert_eq!(
-            wsl_import_args("/tmp/dir", "--version"),
+            wsl_import_args(DistroSlot::INITIAL, "/tmp/dir", "--version"),
             Err(ImportArgsError::PathLooksLikeAFlag)
         );
         assert_eq!(
-            wsl_import_args("", "/tmp/rootfs.tar"),
+            wsl_import_args(DistroSlot::INITIAL, "", "/tmp/rootfs.tar"),
             Err(ImportArgsError::PathEmpty)
         );
         for error in [
@@ -1200,8 +1342,12 @@ mod tests {
         // filter here would reject legitimate paths while protecting against
         // an interpreter that is not being invoked, and would suggest the
         // vector is unsafe without one.
-        let args = wsl_import_args(r"C:\Users\Ada & Co\distro", r"C:\tmp\root fs.tar")
-            .expect("paths with spaces and ampersands are ordinary on Windows");
+        let args = wsl_import_args(
+            DistroSlot::INITIAL,
+            r"C:\Users\Ada & Co\distro",
+            r"C:\tmp\root fs.tar",
+        )
+        .expect("paths with spaces and ampersands are ordinary on Windows");
         assert_eq!(args[2], r"C:\Users\Ada & Co\distro");
         assert_eq!(args[3], r"C:\tmp\root fs.tar");
     }
