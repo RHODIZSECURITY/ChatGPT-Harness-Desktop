@@ -63,7 +63,7 @@ function App() {
   }, [])
 
   return (
-    <div className="grid min-h-screen grid-cols-[232px_minmax(520px,1fr)_248px] grid-rows-[1fr_auto] bg-surface font-sans">
+    <div className="grid min-h-screen grid-cols-[232px_minmax(520px,1fr)_248px] grid-rows-[auto_1fr_auto] bg-surface font-sans">
       <div className="col-span-3 flex items-center gap-2.5 border-b border-edge bg-surface-deep px-5 py-2.5">
         <span className="size-2 rounded-full bg-brand" aria-hidden="true" />
         <span className="text-[13px] font-semibold tracking-tight text-content">
