@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { readFile, readdir } from 'node:fs/promises'
 import { expect, test } from 'vitest'
 
 // Every assertion below is a source-text contract: `indexOf` offsets and `$`
@@ -241,10 +242,17 @@ test('provenance anchors all three approved source repositories at exact commits
   // Assert the shape of every source row, not the literal 'None yet'. Pinning
   // that string makes "nothing imported yet" a permanent invariant, so the test
   // would fail exactly when all three upstreams finally record a real import.
+  // Anchor on the source-table row prefix, not on "any line mentioning a pin".
+  // An import record is required to cite the commit it was taken at, so the
+  // looser filter counted those citations as extra source rows and failed the
+  // moment the first real import was recorded — the opposite of the intent.
   const rows = provenance
     .split('\n')
-    .filter((line) => pins.some((pin) => line.includes(pin)))
+    .filter((line) => line.startsWith('| RHODIZSECURITY/'))
   expect(rows).toHaveLength(pins.length)
+  for (const pin of pins) {
+    expect(rows.filter((row) => row.includes(pin))).toHaveLength(1)
+  }
   for (const row of rows) {
     const cells = row.split('|').map((cell) => cell.trim()).filter(Boolean)
     expect(cells).toHaveLength(5)
@@ -644,4 +652,45 @@ test('the Rust provisioning steps and the renderer union name the same steps in 
   const union = [...types.slice(unionAt, unionEnd).matchAll(/'([a-z0-9_]+)'/g)].map((m) => m[1]!)
 
   expect(union).toEqual(wire)
+})
+
+test('the vendored onyx tokens are byte-identical to what PROVENANCE.md records', async () => {
+  const provenance = await read('PROVENANCE.md')
+  // PROVENANCE.md carries the checksums as the evidence that "Modification:
+  // None" is true. Recomputing them here is what turns that sentence from a
+  // claim into a check: a token edited in place, by anyone, for any reason,
+  // fails this test rather than silently becoming the new baseline.
+  const recorded = [...provenance.matchAll(/^([0-9a-f]{64}) {2}([\w.-]+\.json)$/gm)]
+  expect(recorded.length).toBeGreaterThan(0)
+
+  const dir = process.cwd() + '/src/design/tokens/'
+  const present = (await readdir(dir)).filter((name) => name.endsWith('.json')).sort()
+  expect(present).toEqual(recorded.map((m) => m[2]!).sort())
+
+  for (const [, digest, name] of recorded) {
+    const bytes = await readFile(dir + name!)
+    expect(createHash('sha256').update(bytes).digest('hex'), `${name} was modified`).toBe(digest)
+  }
+})
+
+test('nothing under an enterprise-licensed onyx path is vendored', async () => {
+  // onyx-foss is MIT at its root but web/src/ee and backend/ee carry the Onyx
+  // Enterprise License, which forbids copying outright. The import rule cannot
+  // catch that by reading the root LICENSE, so the prohibition is pinned here
+  // and the reason is stated where an importer will look for it.
+  const provenance = await read('PROVENANCE.md')
+  expect(provenance).toContain('Onyx Enterprise License')
+  expect(provenance).toContain('Nothing under an `ee/` path may be copied')
+
+  const walk = async (dir: string): Promise<string[]> => {
+    const entries = await readdir(dir, { withFileTypes: true })
+    const found: string[] = []
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        found.push(entry.name, ...(await walk(dir + entry.name + '/')))
+      }
+    }
+    return found
+  }
+  expect(await walk(process.cwd() + '/src/')).not.toContain('ee')
 })

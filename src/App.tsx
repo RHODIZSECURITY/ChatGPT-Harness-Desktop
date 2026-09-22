@@ -23,31 +23,31 @@ const PLANNED = {
 /// meaning. `checking` is deliberately not a state the broker can return — it
 /// is the gap before the first answer, and it must not look like a verdict.
 const STATE_TONE: Record<ComponentState | 'checking', string> = {
-  ready: 'text-ok',
-  stopped: 'text-warn',
-  missing: 'text-bad',
-  unavailable: 'text-content-dim',
-  checking: 'text-content-dim',
+  ready: 'text-status-text-success-05',
+  stopped: 'text-status-text-warning-05',
+  missing: 'text-status-text-error-05',
+  unavailable: 'text-text-02',
+  checking: 'text-text-02',
 }
 
 function Rail({ label, heading }: { label: keyof typeof PLANNED; heading: string }) {
   return (
     <aside
       aria-label={label}
-      className="flex flex-col gap-1 border-edge bg-surface-raised px-5 py-6"
+      className="flex flex-col gap-1 border-border-01 bg-background-neutral-01 px-5 py-6"
     >
-      <h2 className="mb-3 text-[11px] font-semibold tracking-[0.12em] text-content-muted uppercase">
+      <h2 className="mb-3 text-[11px] font-semibold tracking-[0.12em] text-text-03 uppercase">
         {heading}
       </h2>
       {PLANNED[label].map((item) => (
         <span
           key={item}
-          className="rounded-md px-2 py-1.5 text-sm text-content-dim select-none"
+          className="rounded-md px-2 py-1.5 text-sm text-text-02 select-none"
         >
           {item}
         </span>
       ))}
-      <span className="mt-auto pt-6 text-[11px] leading-relaxed text-content-dim">
+      <span className="mt-auto pt-6 text-[11px] leading-relaxed text-text-02">
         Not wired yet.
       </span>
     </aside>
@@ -63,35 +63,35 @@ function App() {
   }, [])
 
   return (
-    <div className="grid min-h-screen grid-cols-[232px_minmax(520px,1fr)_248px] grid-rows-[auto_1fr_auto] bg-surface font-sans">
-      <div className="col-span-3 flex items-center gap-2.5 border-b border-edge bg-surface-deep px-5 py-2.5">
-        <span className="size-2 rounded-full bg-brand" aria-hidden="true" />
-        <span className="text-[13px] font-semibold tracking-tight text-content">
+    <div className="grid min-h-screen grid-cols-[232px_minmax(520px,1fr)_248px] grid-rows-[auto_1fr_auto] bg-background-neutral-00 font-sans">
+      <div className="col-span-3 flex items-center gap-2.5 border-b border-border-01 bg-background-neutral-00 px-5 py-2.5">
+        <span className="size-2 rounded-full bg-action-selection-05" aria-hidden="true" />
+        <span className="text-[13px] font-semibold tracking-tight text-text-05">
           RHODIZ Harness
         </span>
       </div>
 
       <Rail label="Projects and sessions" heading="Projects and sessions" />
 
-      <main className="border-x border-edge px-10 py-9">
+      <main className="border-x border-border-01 px-10 py-9">
         <header className="max-w-2xl">
-          <p className="text-[11px] font-semibold tracking-[0.14em] text-brand uppercase">
+          <p className="text-[11px] font-semibold tracking-[0.14em] text-action-text-link-05 uppercase">
             Windows Desktop
           </p>
-          <h1 className="mt-2.5 text-[32px] leading-tight font-semibold tracking-tight text-content">
+          <h1 className="mt-2.5 text-[32px] leading-tight font-semibold tracking-tight text-text-05">
             Harness workspace
           </h1>
-          <p className="mt-3 text-sm leading-relaxed text-content-muted">
+          <p className="mt-3 text-sm leading-relaxed text-text-03">
             Local renderer. Runtime authority remains inside the managed WSL2 stack.
           </p>
         </header>
 
         <section
           aria-label="Conversation"
-          className="mt-10 max-w-2xl rounded-xl border border-edge bg-surface-overlay p-6"
+          className="mt-10 max-w-2xl rounded-xl border border-border-01 bg-background-neutral-01 p-6"
         >
-          <h2 className="text-sm font-semibold text-content">Conversation</h2>
-          <p className="mt-2 text-sm leading-relaxed text-content-muted">
+          <h2 className="text-sm font-semibold text-text-05">Conversation</h2>
+          <p className="mt-2 text-sm leading-relaxed text-text-03">
             Connect a Project and open a coding Session to begin.
           </p>
         </section>
@@ -101,9 +101,9 @@ function App() {
 
       <footer
         aria-label="Runtime status"
-        className="col-span-3 flex flex-wrap items-center gap-x-5 gap-y-1.5 border-t border-edge bg-surface-deep px-5 py-2.5 text-[11px]"
+        className="col-span-3 flex flex-wrap items-center gap-x-5 gap-y-1.5 border-t border-border-01 bg-background-neutral-00 px-5 py-2.5 text-[11px]"
       >
-        <span className={error ? 'text-bad' : 'text-content-muted'}>
+        <span className={error ? 'text-status-text-error-05' : 'text-text-03'}>
           {error ?? (status ? 'Broker: ' + status.platform : 'Checking broker…')}
         </span>
         {COMPONENTS.map(([key, label]) => {

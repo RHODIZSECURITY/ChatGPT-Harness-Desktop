@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:tokens": "node scripts/build-tokens.mjs",
     "lint": "oxlint",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
