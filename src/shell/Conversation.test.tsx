@@ -7,18 +7,26 @@ test('the composer refuses input and says why while the core is down', async () 
   render(<Conversation core="unavailable" />)
 
   // The reason is stated in text, not only implied by a greyed-out field:
-  // "why can I not type" must be answerable without guessing.
-  expect(
-    screen.getAllByText(/Harness Core is not running/).length,
-  ).toBeGreaterThan(0)
+  // "why can I not type" must be answerable without guessing. Exactly once,
+  // though — it was briefly rendered as both the placeholder and the note
+  // below, which reads as a rendering fault rather than an explanation.
+  expect(screen.getAllByText(/Harness Core is not running/)).toHaveLength(1)
   expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+
+  // And not as the placeholder as well. A placeholder is an attribute rather
+  // than text content, so the assertion above cannot see it — the duplicate
+  // was visible in the running window while the suite stayed green.
+  expect(screen.getByLabelText('Message')).toHaveAttribute(
+    'placeholder',
+    'Ask the Harness…',
+  )
 })
 
 test('the gate tracks the broker rather than a flag, and reads differently while checking', () => {
   render(<Conversation core="checking" />)
   // `checking` is the gap before the broker's first answer. Reporting it as a
   // failure would be a verdict the renderer has not earned yet.
-  expect(screen.getAllByText(/Checking the runtime/).length).toBeGreaterThan(0)
+  expect(screen.getAllByText(/Checking the runtime/)).toHaveLength(1)
   expect(screen.queryByText(/not running/)).not.toBeInTheDocument()
 })
 

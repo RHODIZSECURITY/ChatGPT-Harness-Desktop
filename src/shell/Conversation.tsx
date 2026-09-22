@@ -79,7 +79,11 @@ export default function Conversation({ core }: { core: ComponentState | 'checkin
               rows={1}
               maxRows={8}
               variant={ready ? 'primary' : 'disabled'}
-              placeholder={ready ? 'Ask the Harness…' : reason}
+              // The reason belongs under the field, once. Repeating it as the
+              // placeholder reads as a rendering fault, and a placeholder
+              // disappears the moment anyone types — which is exactly when a
+              // disabled field has the least to say.
+              placeholder="Ask the Harness…"
               aria-label="Message"
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
