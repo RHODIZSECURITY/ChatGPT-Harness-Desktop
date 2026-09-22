@@ -51,23 +51,23 @@ function Shell() {
       <RootLayout.App>
         <RootLayout.MainContent>
           <div className="flex h-full flex-col">
-            <header className="shrink-0 px-10 pt-9 pb-2">
-              <Text font="figure-small-label" color="text-03">
-                Windows Desktop
+            {/* A thin strip, not a page header. The transcript is what this
+                window is for, and a permanent block of descriptive copy above
+                every conversation takes the space the conversation should have
+                — which is why neither of the tools this shell is modelled on
+                has one.
+
+                The heading survives the trim. `as` matters beyond styling:
+                Text renders a span by default, and a workspace title that is
+                not a heading is invisible to anyone navigating this window by
+                landmark. What goes is the label and the subtitle: the status
+                bar already states where runtime authority lives, and states it
+                from the broker rather than from a sentence that cannot be
+                wrong. */}
+            <header className="flex shrink-0 items-center border-b border-border-01 px-10 py-3">
+              <Text as="h1" font="main-ui-body" color="text-04">
+                Harness workspace
               </Text>
-              {/* `as` matters beyond styling: Text renders a span by default,
-                  and a workspace title that is not a heading is invisible to
-                  anyone navigating this window by landmark. */}
-              <div className="mt-2">
-                <Text as="h1" font="heading-h2" color="text-05">
-                  Harness workspace
-                </Text>
-              </div>
-              <div className="mt-2 max-w-2xl">
-                <Text as="p" font="main-content-muted" color="text-03">
-                  Local renderer. Runtime authority remains inside the managed WSL2 stack.
-                </Text>
-              </div>
             </header>
             <div className="min-h-0 flex-1">
               <Conversation core={status?.core.state ?? 'checking'} />
