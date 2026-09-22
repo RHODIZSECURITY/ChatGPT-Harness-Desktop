@@ -6,6 +6,7 @@ import { RootLayout, SidebarStateProvider } from '@opal/layouts'
 import { RouterProvider } from './design/next-shim/navigation'
 import Conversation from './shell/Conversation'
 import HarnessSidebar from './shell/HarnessSidebar'
+import { ThemeProvider } from './theme/ThemeProvider'
 import { getRuntimeStatus } from './runtime/bridge'
 import type { ComponentState, RuntimeStatus } from './runtime/types'
 
@@ -141,12 +142,17 @@ export default function App() {
     // own, so mounting one is the consuming application's job — onyx does the
     // same in its own wrapper. Without it every component that can show a
     // tooltip throws on first render, including SidebarTab and LineItemButton.
-    <TooltipProvider delayDuration={400}>
-      <RouterProvider>
-        <SidebarStateProvider>
-          <Shell />
-        </SidebarStateProvider>
-      </RouterProvider>
-    </TooltipProvider>
+    // ThemeProvider sits outermost because it writes to `<html>`, not to the
+    // tree: everything below it renders against whichever token set is in
+    // place, and nothing below it needs to know which one that is.
+    <ThemeProvider>
+      <TooltipProvider delayDuration={400}>
+        <RouterProvider>
+          <SidebarStateProvider>
+            <Shell />
+          </SidebarStateProvider>
+        </RouterProvider>
+      </TooltipProvider>
+    </ThemeProvider>
   )
 }

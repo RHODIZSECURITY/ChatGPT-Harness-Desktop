@@ -4,6 +4,34 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>rhodiz-harness-desktop</title>
+    <script>
+      /* Theme, before first paint.
+       *
+       * The token sheet defaults to dark under `:root`, so without this a
+       * light-theme user gets a dark frame for as long as the module graph
+       * takes to load and mount. This runs synchronously, ahead of it.
+       *
+       * It duplicates two strings from `src/theme/theme.ts` — the storage key
+       * and the class — because a module import here would defeat the point.
+       * `src/theme/theme.test.ts` reads this file and fails if they drift, and
+       * the fallback below mirrors `readStoredPreference`: anything that is
+       * not a preference this build knows about reads as `system`.
+       */
+      ;(function () {
+        try {
+          var stored = localStorage.getItem('rhodiz-harness.theme')
+          var preference = stored === 'dark' || stored === 'light' ? stored : 'system'
+          var light =
+            preference === 'light' ||
+            (preference === 'system' &&
+              matchMedia('(prefers-color-scheme: light)').matches)
+          if (light) document.documentElement.classList.add('light')
+        } catch (error) {
+          /* Storage or matchMedia unavailable: the dark default already
+             applies, and the provider re-decides once React mounts. */
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

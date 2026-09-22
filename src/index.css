@@ -23,6 +23,20 @@ body {
   color: var(--text-04);
 }
 
+/* Native chrome the tokens cannot reach — scrollbars, form controls, the
+ * canvas behind an overscroll — is the browser's to draw, and it draws it
+ * from `color-scheme`. Declared here rather than written from JavaScript so
+ * the class on `<html>` stays the only thing that switches the theme: two
+ * writers for one piece of state is two things that can disagree.
+ */
+html {
+  color-scheme: dark;
+}
+
+html.light {
+  color-scheme: light;
+}
+
 #root {
   min-height: 100vh;
 }

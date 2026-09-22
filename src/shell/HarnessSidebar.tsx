@@ -2,6 +2,7 @@ import { SidebarTab } from '@opal/components'
 import { SvgFolder, SvgPlayCircle } from '@opal/icons'
 import { SidebarLayouts } from '@opal/layouts'
 import RhodizMark from './RhodizMark'
+import ThemeControl from './ThemeControl'
 
 /// Surfaces the shell names but has nothing behind yet. Rendered through the
 /// design system's own disabled state rather than dimmed by hand: a row that
@@ -30,6 +31,15 @@ export default function HarnessSidebar() {
           </SidebarLayouts.Section>
         </div>
       </SidebarLayouts.Body>
+      {/* Opal ships this footer and nothing here had used it. The theme is a
+          window-level preference, not a piece of the conversation, so it sits
+          at the bottom of the chrome rather than in the transcript's header —
+          where both of the tools this shell is modelled on put it. */}
+      <SidebarLayouts.Footer>
+        <div className="pb-3">
+          <ThemeControl />
+        </div>
+      </SidebarLayouts.Footer>
     </SidebarLayouts.Root>
   )
 }
