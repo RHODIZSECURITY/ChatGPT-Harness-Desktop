@@ -152,9 +152,11 @@ jobs:
         shell: pwsh
         run: npm run tauri build
 
-      - name: Upload MSI artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e9274886f1340735a8
+      - name: Upload Windows installer artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: rhodiz-harness-desktop-msi
-          path: src-tauri/target/release/bundle/msi/*.msi
+          name: rhodiz-harness-desktop-windows
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
           retention-days: 7
