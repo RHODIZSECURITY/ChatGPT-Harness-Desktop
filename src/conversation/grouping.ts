@@ -1,4 +1,4 @@
-import { type Packet, PacketType, isOneOf } from './protocol'
+import { type Packet, type PacketObject, PacketType, isOneOf } from './protocol'
 
 /**
  * One renderable unit of the transcript: every packet that shares a position.
@@ -95,6 +95,22 @@ export function groupError(packets: Packet[]): string | null {
   for (const packet of packets) {
     if (isOneOf(packet, [PacketType.ERROR])) {
       return packet.obj.message ?? 'The turn failed without reporting a reason.'
+    }
+  }
+  return null
+}
+
+/**
+ * Find the latest unresolved approval request in a packet stream, if any.
+ *
+ * An approval request requires human intervention and pauses transcript
+ * advance until resolved.
+ */
+export function activeApprovalRequest(packets: Packet[]): Extract<PacketObject, { type: typeof PacketType.APPROVAL_REQUEST }> | null {
+  for (let i = packets.length - 1; i >= 0; i--) {
+    const packet = packets[i]
+    if (packet && isOneOf(packet, [PacketType.APPROVAL_REQUEST])) {
+      return packet.obj
     }
   }
   return null

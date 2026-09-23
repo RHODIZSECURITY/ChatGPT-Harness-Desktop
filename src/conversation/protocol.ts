@@ -61,6 +61,8 @@ export const PacketType = {
   CUSTOM_TOOL_START: 'custom_tool_start',
   CUSTOM_TOOL_ARGS: 'custom_tool_args',
   CUSTOM_TOOL_DELTA: 'custom_tool_delta',
+
+  APPROVAL_REQUEST: 'approval_request',
 } as const
 
 export type PacketType = (typeof PacketType)[keyof typeof PacketType]
@@ -199,6 +201,16 @@ export interface CustomToolDelta {
   error?: { error_message: string } | null
 }
 
+// --- Approval --------------------------------------------------------------
+
+export interface ApprovalRequest {
+  type: typeof PacketType.APPROVAL_REQUEST
+  request_id: string
+  action: string
+  detail?: string
+  arguments?: Record<string, unknown>
+}
+
 // --- Union -----------------------------------------------------------------
 
 export type PacketObject =
@@ -222,6 +234,7 @@ export type PacketObject =
   | CustomToolStart
   | CustomToolArgs
   | CustomToolDelta
+  | ApprovalRequest
 
 export interface Packet {
   placement: Placement
