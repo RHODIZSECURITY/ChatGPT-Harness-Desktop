@@ -1,11 +1,15 @@
-import { useCallback, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { SidebarTab, Text } from '@opal/components'
 import { SvgHistory, SvgBubbleText, SvgFolder, SvgPlus } from '@opal/icons'
 import { SidebarLayouts, useSidebarFolded } from '@opal/layouts'
 import {
+  ACTIVE_SESSION_STORAGE_KEY,
+  MAX_SESSIONS,
+  SESSIONS_STORAGE_KEY,
   createNewSession,
   loadActiveSessionId,
   loadSessions,
+  sanitizeTitle,
   saveActiveSessionId,
   saveSessions,
 } from '../session/sessionStore'
@@ -19,6 +23,8 @@ interface HarnessSidebarProps {
   onNewSession?: (session: SessionItem) => void
 }
 
+const renderAppLogo = () => RhodizMark
+
 function Wordmark() {
   const folded = useSidebarFolded()
   if (folded) return null
@@ -29,41 +35,110 @@ function Wordmark() {
   )
 }
 
+interface SessionTabRowProps {
+  session: SessionItem
+  selected: boolean
+  isArchived?: boolean
+  onSelect: (id: string) => void
+}
+
+const SessionTabRow = memo(function SessionTabRow({
+  session,
+  selected,
+  isArchived = false,
+  onSelect,
+}: SessionTabRowProps) {
+  const handleClick = useCallback(() => {
+    onSelect(session.id)
+  }, [onSelect, session.id])
+
+  const safeTitle = sanitizeTitle(session.title) || 'Untitled Session'
+  const tooltipText = isArchived ? `${safeTitle} (archived)` : safeTitle
+  const icon = isArchived ? SvgHistory : SvgBubbleText
+
+  return (
+    <SidebarTab
+      icon={icon}
+      selected={selected}
+      onClick={handleClick}
+      tooltip={tooltipText}
+    >
+      {safeTitle}
+    </SidebarTab>
+  )
+})
+
 export default function HarnessSidebar({
   activeSessionId: controlledActiveId,
   onSelectSession,
   onNewSession,
 }: HarnessSidebarProps = {}) {
   const [sessions, setSessions] = useState<SessionItem[]>(() => loadSessions())
-  const [internalActiveId, setInternalActiveId] = useState<string>(() => loadActiveSessionId())
+  const validIds = useMemo(() => sessions.map((s) => s.id), [sessions])
+  const [internalActiveId, setInternalActiveId] = useState<string>(() => loadActiveSessionId(validIds))
 
-  const activeId = controlledActiveId ?? internalActiveId
+  // Cross-window / cross-tab reactive synchronization
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === SESSIONS_STORAGE_KEY) {
+        const next = loadSessions()
+        setSessions(next)
+        setInternalActiveId(loadActiveSessionId(next.map((s) => s.id)))
+      } else if (e.key === ACTIVE_SESSION_STORAGE_KEY) {
+        setInternalActiveId(loadActiveSessionId(validIds))
+      }
+    }
+    window.addEventListener('storage', handleStorage)
+    return () => window.removeEventListener('storage', handleStorage)
+  }, [validIds])
+
+  // Ground activeId in validIds to prevent orphaned selections
+  const activeId = useMemo(() => {
+    const candidate = controlledActiveId ?? internalActiveId
+    if (validIds.length > 0 && !validIds.includes(candidate)) {
+      return validIds[0]
+    }
+    return candidate
+  }, [controlledActiveId, internalActiveId, validIds])
 
   const handleSelect = useCallback(
     (id: string) => {
+      if (!validIds.includes(id)) return
       setInternalActiveId(id)
-      saveActiveSessionId(id)
+      saveActiveSessionId(id, validIds)
       onSelectSession?.(id)
     },
-    [onSelectSession],
+    [validIds, onSelectSession],
   )
 
   const handleCreate = useCallback(() => {
     const session = createNewSession()
-    const nextSessions = [session, ...sessions]
-    setSessions(nextSessions)
-    saveSessions(nextSessions)
-    setInternalActiveId(session.id)
-    saveActiveSessionId(session.id)
-    onNewSession?.(session)
-  }, [sessions, onNewSession])
+    // Read fresh from storage to mitigate lost update race condition
+    const currentStored = loadSessions()
+    const merged = [session, ...currentStored.filter((s) => s.id !== session.id)].slice(0, MAX_SESSIONS)
+    const nextValidIds = merged.map((s) => s.id)
 
-  const activeSessions = sessions.filter((s) => s.state === 'active')
-  const archivedSessions = sessions.filter((s) => s.state === 'archived')
+    setSessions(merged)
+    saveSessions(merged)
+    setInternalActiveId(session.id)
+    saveActiveSessionId(session.id, nextValidIds)
+    onNewSession?.(session)
+    onSelectSession?.(session.id)
+  }, [onNewSession, onSelectSession])
+
+  const { activeSessions, archivedSessions } = useMemo(() => {
+    const active: SessionItem[] = []
+    const archived: SessionItem[] = []
+    for (const item of sessions) {
+      if (item.state === 'active') active.push(item)
+      else if (item.state === 'archived') archived.push(item)
+    }
+    return { activeSessions: active, archivedSessions: archived }
+  }, [sessions])
 
   return (
     <SidebarLayouts.Root foldable>
-      <SidebarLayouts.Header renderAppLogo={() => RhodizMark} showLogoWhenFolded>
+      <SidebarLayouts.Header renderAppLogo={renderAppLogo} showLogoWhenFolded>
         <Wordmark />
       </SidebarLayouts.Header>
 
@@ -84,15 +159,12 @@ export default function HarnessSidebar({
         <div aria-label="Sessions">
           <SidebarLayouts.Section title="Sessions">
             {activeSessions.map((session) => (
-              <SidebarTab
+              <SessionTabRow
                 key={session.id}
-                icon={SvgBubbleText}
+                session={session}
                 selected={session.id === activeId}
-                onClick={() => handleSelect(session.id)}
-                tooltip={session.title}
-              >
-                {session.title}
-              </SidebarTab>
+                onSelect={handleSelect}
+              />
             ))}
           </SidebarLayouts.Section>
         </div>
@@ -102,15 +174,13 @@ export default function HarnessSidebar({
           <div aria-label="Archived Sessions" className="mt-4">
             <SidebarLayouts.Section title="Archived">
               {archivedSessions.map((session) => (
-                <SidebarTab
+                <SessionTabRow
                   key={session.id}
-                  icon={SvgHistory}
+                  session={session}
                   selected={session.id === activeId}
-                  onClick={() => handleSelect(session.id)}
-                  tooltip={`${session.title} (archived)`}
-                >
-                  {session.title}
-                </SidebarTab>
+                  isArchived
+                  onSelect={handleSelect}
+                />
               ))}
             </SidebarLayouts.Section>
           </div>

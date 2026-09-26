@@ -85,3 +85,23 @@ test('renders archived section when archived sessions exist', () => {
   expect(screen.getByLabelText('Archived Sessions')).toBeInTheDocument()
   expect(screen.getByText('Old History Item')).toBeInTheDocument()
 })
+
+test('New Session in controlled mode calls onSelectSession with new ID', async () => {
+  const user = userEvent.setup()
+  const onSelectSession = vitest.fn()
+  const onNewSession = vitest.fn()
+
+  renderSidebar({
+    activeSessionId: 'initial-id',
+    onSelectSession,
+    onNewSession,
+  })
+
+  const newSessionBtn = screen.getByRole('button', { name: 'New Session' })
+  await user.click(newSessionBtn)
+
+  expect(onNewSession).toHaveBeenCalledTimes(1)
+  expect(onSelectSession).toHaveBeenCalledTimes(1)
+  const createdId = onNewSession.mock.calls[0][0].id
+  expect(onSelectSession).toHaveBeenCalledWith(createdId)
+})

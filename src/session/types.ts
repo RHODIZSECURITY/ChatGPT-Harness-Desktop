@@ -6,5 +6,4 @@ export interface SessionItem {
   state: SessionState
   createdAt: string
   updatedAt?: string
-  lastMessage?: string
 }
