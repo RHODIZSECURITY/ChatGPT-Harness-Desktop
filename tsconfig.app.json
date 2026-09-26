@@ -4,8 +4,15 @@
     "target": "es2023",
     "lib": ["ES2023", "DOM"],
     "module": "esnext",
-    "types": ["vite/client"],
+    "types": ["vite/client", "@testing-library/jest-dom"],
     "allowArbitraryExtensions": true,
+    "paths": {
+      "@opal/*": ["./node_modules/.tmp/vendor-dts/src/design/opal/*"],
+      "@onyx-ai/shared/contracts": ["./node_modules/.tmp/vendor-dts/src/design/shared/contracts/index.d.ts"],
+      "next": ["./node_modules/.tmp/shim-dts/src/design/next-shim/index.d.ts"],
+      "next/link": ["./node_modules/.tmp/shim-dts/src/design/next-shim/link.d.ts"],
+      "next/navigation": ["./node_modules/.tmp/shim-dts/src/design/next-shim/navigation.d.ts"]
+    },
     "skipLibCheck": true,
 
     /* Bundler mode */
@@ -22,5 +29,7 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["src/design/opal", "src/design/shared", "src/design/next-shim"],
+  "references": [{ "path": "./tsconfig.vendor.json" }, { "path": "./tsconfig.shim.json" }]
 }

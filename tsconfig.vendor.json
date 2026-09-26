@@ -1,0 +1,40 @@
+{
+  "//": [
+    "Vendored third-party source: src/design/opal and src/design/shared, copied",
+    "byte-identical from onyx-foss (see PROVENANCE.md). It is typechecked, but",
+    "against the settings it was written under rather than this repository's,",
+    "because the alternative is editing 27 upstream files to satisfy rules they",
+    "never opted into — and an edited copy is no longer the thing the checksums",
+    "in PROVENANCE.md attest to. Code this project authors, src/design/next-shim",
+    "included, stays in tsconfig.app.json under the strict settings."
+  ],
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.vendor.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "esnext",
+    "types": ["vite/client", "node"],
+    "allowArbitraryExtensions": true,
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "verbatimModuleSyntax": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "composite": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "rootDir": ".",
+    "outDir": "./node_modules/.tmp/vendor-dts",
+    "jsx": "react-jsx",
+    "strict": true,
+    "paths": {
+      "@opal/*": ["./src/design/opal/*"],
+      "@onyx-ai/shared/contracts": ["./src/design/shared/contracts/index.ts"],
+      "next": ["./node_modules/.tmp/shim-dts/src/design/next-shim/index.d.ts"],
+      "next/link": ["./node_modules/.tmp/shim-dts/src/design/next-shim/link.d.ts"],
+      "next/navigation": ["./node_modules/.tmp/shim-dts/src/design/next-shim/navigation.d.ts"]
+    }
+  },
+  "include": ["src/design/opal", "src/design/shared"],
+  "references": [{ "path": "./tsconfig.shim.json" }]
+}

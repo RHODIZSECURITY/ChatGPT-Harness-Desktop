@@ -1,2 +1,52 @@
-html { background: #0f1116; }
-body { margin: 0; min-width: 960px; min-height: 100vh; }
+@import "tailwindcss";
+@import "./design/tokens.css";
+@import "./design/theme.css";
+/* The `@utility font-*` presets. Opal's own root.css imports its metrics, not
+ * these: without this line every `font-heading-h2` in the app resolves to
+ * nothing and the type scale silently flattens. */
+@import "./design/typography.css";
+@import "./design/opal/root.css";
+/* Last, and that is the whole mechanism: the accent overrides below are plain
+ * `:root` / `.light` declarations at the same specificity as the generated
+ * tokens, so source order is what decides which one wins. */
+@import "./design/brand.css";
+/* What the shell changes about the vendored sidebar's *layout*. Not the same
+ * mechanism: Opal's layout rules arrive through the module graph rather than
+ * root.css, so they land after this file no matter where the import sits and
+ * source order cannot decide it. Each rule in there wins on specificity, and
+ * says so. */
+@import "./design/shell.css";
+
+/* Tailwind 4 scans imported sources for class names; the vendored library is
+ * outside src/ as far as its default heuristic is concerned. */
+@source "./design/opal";
+
+/* The design system is onyx-foss's: tokens vendored from `web/lib/shared`,
+ * compiled by scripts/build-tokens.mjs, exposed under the same utility names
+ * its Opal preset uses. PROVENANCE.md records the import. Nothing is invented
+ * here — this file only chooses the defaults the shell starts from.
+ */
+html,
+body {
+  margin: 0;
+  background: var(--background-neutral-00);
+  color: var(--text-04);
+}
+
+/* Native chrome the tokens cannot reach — scrollbars, form controls, the
+ * canvas behind an overscroll — is the browser's to draw, and it draws it
+ * from `color-scheme`. Declared here rather than written from JavaScript so
+ * the class on `<html>` stays the only thing that switches the theme: two
+ * writers for one piece of state is two things that can disagree.
+ */
+html {
+  color-scheme: dark;
+}
+
+html.light {
+  color-scheme: light;
+}
+
+#root {
+  min-height: 100vh;
+}

@@ -1,0 +1,31 @@
+{
+  "//": [
+    "src/design/next-shim is this project's own code, so it keeps the strict",
+    "settings. It needs a project of its own because both the app and the",
+    "vendored tree import it — the app directly, the vendored tree through the",
+    "`next/*` path alias — and a file may belong to only one composite project."
+  ],
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.shim.tsbuildinfo",
+    "composite": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "rootDir": ".",
+    "outDir": "./node_modules/.tmp/shim-dts",
+    "target": "es2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "esnext",
+    "types": ["vite/client", "@testing-library/jest-dom"],
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src/design/next-shim"],
+  "exclude": ["src/design/next-shim/**/*.test.tsx"]
+}

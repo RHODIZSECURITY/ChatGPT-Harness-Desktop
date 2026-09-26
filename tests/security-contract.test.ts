@@ -1,11 +1,14 @@
-import { readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { readFile, readdir } from 'node:fs/promises'
 import { expect, test } from 'vitest'
 
 // Every assertion below is a source-text contract: `indexOf` offsets and `$`
 // anchors both change meaning under CRLF, and the Windows CI runner checks out
 // with CRLF. Normalise once, here, so no individual test has to remember.
+const readBytes = async (relative: string) =>
+  readFile(new URL('../' + relative, import.meta.url))
 const read = async (relative: string) =>
-  (await readFile(new URL('../' + relative, import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
+  (await readBytes(relative)).toString('utf8').replace(/\r\n/g, '\n')
 
 test('Tauri shell is local-only with a non-null CSP and production devtools disabled', async () => {
   const config = JSON.parse(await read('src-tauri/tauri.conf.json'))
@@ -241,10 +244,17 @@ test('provenance anchors all three approved source repositories at exact commits
   // Assert the shape of every source row, not the literal 'None yet'. Pinning
   // that string makes "nothing imported yet" a permanent invariant, so the test
   // would fail exactly when all three upstreams finally record a real import.
+  // Anchor on the source-table row prefix, not on "any line mentioning a pin".
+  // An import record is required to cite the commit it was taken at, so the
+  // looser filter counted those citations as extra source rows and failed the
+  // moment the first real import was recorded — the opposite of the intent.
   const rows = provenance
     .split('\n')
-    .filter((line) => pins.some((pin) => line.includes(pin)))
+    .filter((line) => line.startsWith('| RHODIZSECURITY/'))
   expect(rows).toHaveLength(pins.length)
+  for (const pin of pins) {
+    expect(rows.filter((row) => row.includes(pin))).toHaveLength(1)
+  }
   for (const row of rows) {
     const cells = row.split('|').map((cell) => cell.trim()).filter(Boolean)
     expect(cells).toHaveLength(5)
@@ -644,4 +654,244 @@ test('the Rust provisioning steps and the renderer union name the same steps in 
   const union = [...types.slice(unionAt, unionEnd).matchAll(/'([a-z0-9_]+)'/g)].map((m) => m[1]!)
 
   expect(union).toEqual(wire)
+})
+
+test('the vendored onyx tokens are byte-identical to what PROVENANCE.md records', async () => {
+  const provenance = await read('PROVENANCE.md')
+  // PROVENANCE.md carries the checksums as the evidence that "Modification:
+  // None" is true. Recomputing them here is what turns that sentence from a
+  // claim into a check: a token edited in place, by anyone, for any reason,
+  // fails this test rather than silently becoming the new baseline.
+  const recorded = [...provenance.matchAll(/^([0-9a-f]{64}) {2}([\w.-]+\.json)$/gm)]
+  expect(recorded.length).toBeGreaterThan(0)
+
+  const dir = process.cwd() + '/src/design/tokens/'
+  const present = (await readdir(dir)).filter((name) => name.endsWith('.json')).sort()
+  expect(present).toEqual(recorded.map((m) => m[2]!).sort())
+
+  for (const [, digest, name] of recorded) {
+    const bytes = await readFile(dir + name!)
+    expect(createHash('sha256').update(bytes).digest('hex'), `${name} was modified`).toBe(digest)
+  }
+})
+
+test('nothing under an enterprise-licensed onyx path is vendored', async () => {
+  // onyx-foss is MIT at its root but web/src/ee and backend/ee carry the Onyx
+  // Enterprise License, which forbids copying outright. The import rule cannot
+  // catch that by reading the root LICENSE, so the prohibition is pinned here
+  // and the reason is stated where an importer will look for it.
+  const provenance = await read('PROVENANCE.md')
+  expect(provenance).toContain('Onyx Enterprise License')
+  expect(provenance).toContain('Nothing under an `ee/` path may be copied')
+
+  const walk = async (dir: string): Promise<string[]> => {
+    const entries = await readdir(dir, { withFileTypes: true })
+    const found: string[] = []
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        found.push(entry.name, ...(await walk(dir + entry.name + '/')))
+      }
+    }
+    return found
+  }
+  expect(await walk(process.cwd() + '/src/')).not.toContain('ee')
+})
+
+test('the vendored Opal tree matches the digest PROVENANCE.md records', async () => {
+  // Per-file checksums are reviewable for six token files and decoration for
+  // five hundred component files, so the whole vendored tree is pinned by one
+  // digest over a sorted manifest instead. It changes when anything under it
+  // changes, which is the property that matters: an edit to a vendored file is
+  // a supply-chain event whether or not anyone meant it as one.
+  const { vendorDigest } = await import('../scripts/vendor-digest.mjs')
+  const provenance = await read('PROVENANCE.md')
+
+  const recorded = /Tree digest \| `([0-9a-f]{64})` over (\d+) files/.exec(provenance)
+  expect(recorded, 'PROVENANCE.md records no tree digest').not.toBeNull()
+
+  const actual = vendorDigest()
+  expect(actual.count, 'the vendored file count changed').toBe(Number(recorded![2]))
+  expect(actual.digest, 'a vendored file was modified').toBe(recorded![1])
+})
+
+test('the vendored tree reaches no network and no persistent storage', async () => {
+  // Opal is presentational. Pinning that here means a future bump cannot
+  // quietly bring in a component that phones home, and states the one storage
+  // use that does exist rather than leaving the claim absolute and wrong.
+  const { readdir } = await import('node:fs/promises')
+  const roots = ['src/design/opal', 'src/design/shared']
+  const sources: string[] = []
+  const walk = async (dir: string) => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const path = `${dir}/${entry.name}`
+      if (entry.isDirectory()) await walk(path)
+      else if (/\.tsx?$/.test(entry.name)) sources.push(path)
+    }
+  }
+  for (const root of roots) await walk(process.cwd() + '/' + root)
+  expect(sources.length).toBe(378)
+
+  const banned = [
+    'fetch(', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'sendBeacon',
+    'eval(', 'dangerouslySetInnerHTML', 'localStorage', 'document.cookie',
+  ]
+  const offenders: string[] = []
+  for (const file of sources) {
+    const text = await readFile(file, 'utf8')
+    for (const needle of banned) {
+      if (text.includes(needle)) offenders.push(`${needle} in ${file}`)
+    }
+  }
+  expect(offenders).toEqual([])
+
+  // The one exception, named so it cannot grow silently.
+  const withSessionStorage: string[] = []
+  for (const file of sources) {
+    if ((await readFile(file, 'utf8')).includes('sessionStorage')) {
+      withSessionStorage.push(file.slice(process.cwd().length + 1))
+    }
+  }
+  expect(withSessionStorage).toEqual(['src/design/opal/layouts/sidebar/components.tsx'])
+})
+
+test('the generated type scale actually reaches the stylesheet', async () => {
+  // The presets are `@utility` rules in a generated file, and a generated file
+  // that nothing imports produces no error — every `font-*` class in the app
+  // just resolves to nothing and the scale silently flattens. That happened,
+  // and it was visible only in the running window.
+  const index = await read('src/index.css')
+  expect(index).toContain('@import "./design/typography.css"')
+
+  const typography = await read('src/design/typography.css')
+  const presets = [...typography.matchAll(/^@utility (font-[a-z0-9-]+) \{$/gm)].map((m) => m[1]!)
+  expect(presets.length).toBeGreaterThan(15)
+
+  // Every preset the shell names must be one the generator emits.
+  const app = await read('src/App.tsx')
+  const used = [...app.matchAll(/font="([a-z0-9-]+)"/g)].map((m) => `font-${m[1]!}`)
+  expect(used.length).toBeGreaterThan(0)
+  for (const preset of used) expect(presets, `${preset} is not a generated preset`).toContain(preset)
+})
+
+test('the bundled typefaces are byte-identical to what PROVENANCE.md records', async () => {
+  // Same mechanism as the token checksums above, and for a stronger reason: a
+  // font is an opaque binary nobody reviews by reading it. The digest is what
+  // ties the file in this repository to the file that was downloaded from the
+  // recorded URL and inspected, and it is the only thing that would notice a
+  // swap.
+  const provenance = await read('PROVENANCE.md')
+  const recorded = [...provenance.matchAll(/^([0-9a-f]{64}) {2}([\w-]+\.woff2)$/gm)]
+  expect(recorded.length).toBe(4)
+
+  const dir = process.cwd() + '/src/design/fonts/'
+  const present = (await readdir(dir)).filter((name) => name.endsWith('.woff2')).sort()
+  expect(present).toEqual(recorded.map((m) => m[2]!).sort())
+
+  for (const [, digest, name] of recorded) {
+    const bytes = await readFile(dir + name!)
+    expect(createHash('sha256').update(bytes).digest('hex'), `${name} was replaced`).toBe(digest)
+  }
+
+  // Redistributing them is only lawful under their licences, so the licences
+  // ship beside them rather than being a line in a document.
+  const licences = (await readdir(dir)).filter((name) => name.startsWith('OFL-'))
+  expect(licences.sort()).toEqual(['OFL-HankenGrotesk.txt', 'OFL-JetBrainsMono.txt'])
+})
+
+test('no font this application declares can be fetched off the machine', async () => {
+  // The CSP is `font-src 'self' data:`, so a remote @font-face does not fail
+  // loudly — it fails as the shell rendering in whatever the operating system
+  // picks. The rule is pinned against the stylesheet rather than trusted to
+  // review.
+  const csp = JSON.parse(await read('src-tauri/tauri.conf.json')).app.security.csp
+  expect(csp).toContain("font-src 'self' data:")
+
+  const brand = await read('src/design/brand.css')
+  const urls = [...brand.matchAll(/src:\s*url\("([^"]+)"\)/g)].map((m) => m[1]!)
+  expect(urls.length).toBe(4)
+  for (const url of urls) {
+    expect(url, 'a font must resolve inside the bundle').toMatch(/^\.\/fonts\/[\w-]+\.woff2$/)
+    // Vite verifies this too, but only for a path it can see; asserting it here
+    // is what keeps a renamed file from being caught at build time in CI rather
+    // than here, next to the reason.
+    await expect(readFile(process.cwd() + '/src/design/' + url.slice(2))).resolves.toBeTruthy()
+  }
+})
+
+test('every weight the type scale asks for is one the bundled fonts can render', async () => {
+  // This is the whole reason the files are variable rather than static. One
+  // preset asks for 450; a static 400 file does not fail on that, it snaps to
+  // 400, and the preset quietly stops being a distinct weight.
+  const brand = await read('src/design/brand.css')
+  const ranges = [...brand.matchAll(/font-weight:\s*(\d+)\s+(\d+);/g)].map(
+    (m) => [Number(m[1]), Number(m[2])] as const,
+  )
+  expect(ranges.length).toBe(4)
+  const floor = Math.max(...ranges.map(([low]) => low))
+  const ceiling = Math.min(...ranges.map(([, high]) => high))
+
+  const typography = await read('src/design/typography.css')
+  const weights = [...typography.matchAll(/font-weight:\s*(\d+);/g)].map((m) => Number(m[1]))
+  expect(weights.length).toBeGreaterThan(15)
+  expect(weights).toContain(450)
+  for (const weight of new Set(weights)) {
+    expect(weight, `weight ${weight} is outside every bundled font's axis`).toBeGreaterThanOrEqual(
+      floor,
+    )
+    expect(weight, `weight ${weight} is outside every bundled font's axis`).toBeLessThanOrEqual(
+      ceiling,
+    )
+  }
+})
+
+test('the brand overrides are loaded where they can actually override', async () => {
+  // `:root` and `.light` are both specificity (0,1,0). Nothing about these
+  // declarations wins on its own — being imported after the generated tokens
+  // is the entire mechanism, and an import reordered by a tidy-up would revert
+  // the accent and the mono family with no error anywhere.
+  const index = await read('src/index.css')
+  const tokens = index.indexOf('@import "./design/tokens.css"')
+  const brand = index.indexOf('@import "./design/brand.css"')
+  expect(tokens).toBeGreaterThan(-1)
+  expect(brand).toBeGreaterThan(tokens)
+
+  const sheet = await read('src/design/brand.css')
+  // The mono token names a family the bundle does not contain, so it is
+  // corrected here; if that override is lost the code blocks fall through to a
+  // different system font on every operating system.
+  expect(sheet).toMatch(/--font-dm-mono:\s*"JetBrains Mono"/)
+  expect(await read('src/design/tokens.css')).toMatch(/--font-dm-mono:\s*"DM Mono"/)
+
+  // Both themes, or the light one keeps onyx's accent and the two disagree.
+  for (const scope of [':root', '.light']) {
+    const at = sheet.indexOf(scope + ' {\n  --action-selection-06')
+    expect(at, `${scope} carries no accent ramp`).toBeGreaterThan(-1)
+    const block = sheet.slice(at, sheet.indexOf('}', at))
+    expect([...block.matchAll(/--action-(?:selection-0\d|text-link-05):/g)].length).toBe(8)
+  }
+})
+
+test('the sidebar mark is the transparent master, not the packaged application icon', async () => {
+  // `src-tauri/icons/64x64.png` is a fully opaque tile — right for a taskbar,
+  // where the platform draws no backdrop, and wrong inside the window, where
+  // it renders as a hard-edged rectangle darker than the surface behind it.
+  // The regression is silent: the import resolves, the image decodes, and only
+  // a screenshot shows the black square.
+  const mark = await read('src/shell/RhodizMark.tsx')
+  // The import line, not the prose: the comment above it names the same path
+  // to explain why it is not used, and a match there would pass forever.
+  const imports = [...mark.matchAll(/^import .* from '(.+)'$/gm)].map((m) => m[1])
+  expect(imports).toContain('./rhodiz-mark.png')
+  expect(imports.some((from) => from.includes('src-tauri/icons'))).toBe(false)
+
+  // `readBytes`, not `new URL('literal', import.meta.url)`: Vite recognises
+  // that exact shape as an asset reference and rewrites it to a served URL, so
+  // the literal form resolves to http://localhost and readFile refuses it.
+  const png = await readBytes('src/shell/rhodiz-mark.png')
+  expect(png.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a')
+  // IHDR: width, height, then bit depth and colour type. Type 6 is RGBA — an
+  // opaque re-export would land on 2 and lose the alpha this depends on.
+  expect(png.readUInt32BE(16)).toBe(112)
+  expect(png.readUInt32BE(20)).toBe(112)
+  expect(png.readUInt8(25)).toBe(6)
 })
