@@ -52,3 +52,27 @@ if (!('matchMedia' in globalThis)) {
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {}
 }
+
+/**
+ * Radix's Select tracks pointer capture on its trigger while the menu opens.
+ * jsdom implements neither `hasPointerCapture` nor its setters, so the open
+ * throws an unhandled error before the list mounts — a failure in the test
+ * environment that looks exactly like options that do not exist.
+ *
+ * Same boundary as the stubs above: capture moves nothing in jsdom, so a
+ * test may open the list and assert on what it contains, never on pointer
+ * routing. `hasPointerCapture` reports false rather than throwing, which is
+ * what a pointer that was never captured would answer.
+ */
+
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false
+}
+
+if (!Element.prototype.setPointerCapture) {
+  Element.prototype.setPointerCapture = () => {}
+}
+
+if (!Element.prototype.releasePointerCapture) {
+  Element.prototype.releasePointerCapture = () => {}
+}

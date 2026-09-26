@@ -5,7 +5,9 @@ import { SvgCheckSquare, SvgCode, SvgColumn, SvgFiles, SvgTerminal } from '@opal
 import { RootLayout, SidebarStateProvider } from '@opal/layouts'
 import { RouterProvider } from './design/next-shim/navigation'
 import Conversation from './shell/Conversation'
+import ComposerControlBelt from './shell/ComposerControlBelt'
 import HarnessSidebar from './shell/HarnessSidebar'
+import { STATE_TONE } from './shell/statusTone'
 import {
   readPanelFlag,
   SIDEBAR_FOLDED_KEY,
@@ -14,7 +16,7 @@ import {
 } from './shell/panelState'
 import { ThemeProvider } from './theme/ThemeProvider'
 import { getRuntimeStatus } from './runtime/bridge'
-import type { ComponentState, RuntimeStatus } from './runtime/types'
+import type { RuntimeStatus } from './runtime/types'
 
 const COMPONENTS: Array<[keyof Omit<RuntimeStatus, 'platform'>, string]> = [
   ['wsl2', 'WSL2'],
@@ -25,16 +27,10 @@ const COMPONENTS: Array<[keyof Omit<RuntimeStatus, 'platform'>, string]> = [
   ['providers', 'Providers'],
 ]
 
-/// The status bar is the only live data in the shell, so its colour carries
-/// meaning. `checking` is deliberately not a state the broker can return — it
+/// Tone lives in `statusTone.ts` with the belt: two maps drift, and drift here
+/// means the same state reading as success in one strip and as noise in the
+/// other. `checking` is deliberately not a state the broker can return — it
 /// is the gap before the first answer, and must not look like a verdict.
-const STATE_TONE: Record<ComponentState | 'checking', string> = {
-  ready: 'text-status-text-success-05',
-  stopped: 'text-status-text-warning-05',
-  missing: 'text-status-text-error-05',
-  unavailable: 'text-text-02',
-  checking: 'text-text-02',
-}
 
 const WORKSPACE = [
   { title: 'Files', icon: SvgFiles },
@@ -108,7 +104,10 @@ function Shell() {
               />
             </header>
             <div className="min-h-0 flex-1">
-              <Conversation core={status?.core.state ?? 'checking'} />
+              <Conversation
+                core={status?.core.state ?? 'checking'}
+                slots={{ controlBelt: <ComposerControlBelt status={status} /> }}
+              />
             </div>
           </div>
         </RootLayout.MainContent>
