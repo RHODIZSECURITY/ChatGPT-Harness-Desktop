@@ -43,12 +43,14 @@ test('renders the three desktop work areas and live runtime states', async () =>
   // weaker than a real control — a screen reader will not call it a button —
   // but it is what the library exposes, and a test that claimed otherwise
   // would be describing a component this project does not have.
-  for (const label of ['Projects', 'Sessions', 'Files', 'Terminal']) {
-    const row = screen.getByText(label).closest('[aria-disabled]')
+  // Sessions are active, New Session is clickable. Projects and workspace items remain disabled for now.
+  for (const label of ['Projects', 'Files', 'Terminal']) {
+    const row = screen.getAllByText(label)[0].closest('[aria-disabled]')
     expect(row, `${label} is not rendered as a disabled control`).not.toBeNull()
     expect(row).toHaveAttribute('aria-disabled', 'true')
   }
-  expect(screen.getByLabelText('Projects and sessions')).toBeInTheDocument()
+  expect(screen.getByLabelText('Sessions')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'New Session' })).toBeInTheDocument()
   expect(screen.getByLabelText('Conversation')).toBeInTheDocument()
   expect(screen.getByLabelText('Workspace details')).toBeInTheDocument()
   expect(await screen.findByText('Broker: windows')).toBeInTheDocument()
